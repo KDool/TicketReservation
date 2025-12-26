@@ -1,0 +1,106 @@
+services:
+  res1:
+    build: ../erlang
+    container_name: res1
+    hostname: res1
+    environment:
+      ERLANG_COOKIE: ticketcookie
+      ERL_SNAME: res1
+      MNESIA_DIR: /var/lib/mnesia
+      MNESIA_NODES: res1@res1,res2@res2,res3@res3
+      INIT_MNESIA: "true"
+      DIST_MIN: "9100"
+      DIST_MAX: "9105"
+    volumes:
+      - mnesia_res1:/var/lib/mnesia
+    networks:
+      - erlangnet
+    ports:
+      - "4369:4369"
+      - "9100-9105:9100-9105"
+
+  res2:
+    build: ../erlang
+    container_name: res2
+    hostname: res2
+    environment:
+      ERLANG_COOKIE: ticketcookie
+      ERL_SNAME: res2
+      MNESIA_DIR: /var/lib/mnesia
+      MNESIA_NODES: res1@res1,res2@res2,res3@res3
+      INIT_MNESIA: "false"
+      DIST_MIN: "9106"
+      DIST_MAX: "9111"
+    volumes:
+      - mnesia_res2:/var/lib/mnesia
+    networks:
+      - erlangnet
+    depends_on:
+      - res1
+    ports:
+      - "4370:4369"
+      - "9106-9111:9106-9111"
+
+  res3:
+    build: ../erlang
+    container_name: res3
+    hostname: res3
+    environment:
+      ERLANG_COOKIE: ticketcookie
+      ERL_SNAME: res3
+      MNESIA_DIR: /var/lib/mnesia
+      MNESIA_NODES: res1@res1,res2@res2,res3@res3
+      INIT_MNESIA: "false"
+      DIST_MIN: "9112"
+      DIST_MAX: "9117"
+    volumes:
+      - mnesia_res3:/var/lib/mnesia
+    networks:
+      - erlangnet
+    depends_on:
+      - res1
+    ports:
+      - "4371:4369"
+      - "9112-9117:9112-9117"
+      
+  # gateway:
+  #   build: ../java
+  #   container_name: gateway
+  #   hostname: gateway
+  #   working_dir: /app
+  #   volumes:
+  #     - ../java/testJinterface:/app
+  #   environment:
+  #     ERLANG_COOKIE: ticketcookie
+  #   command: ["bash", "-lc", "epmd -daemon && tail -f /dev/null"]
+  #   networks:
+  #     - erlangnet
+  #   depends_on:
+  #     - res1
+  #     - res2
+  #     - res3
+  gateway:
+    build: ../java/demo
+    container_name: gateway
+    hostname: gateway
+    depends_on:
+      - res1
+      - res2
+      - res3
+    networks:
+      - erlangnet
+    ports:
+      - "8080:8080"
+      - "5005:5005"
+    environment:
+      ERLANG_COOKIE: ticketcookie
+
+
+networks:
+  erlangnet:
+    driver: bridge
+
+volumes:
+  mnesia_res1:
+  mnesia_res2:
+  mnesia_res3:
