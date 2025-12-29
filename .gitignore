@@ -1,5 +1,6 @@
 # macOS Finder metadata
 .DS_Store
+**/.DS_Store
 
 # VS Code settings
 .vscode/
