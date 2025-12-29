@@ -62,3 +62,32 @@ If the Erlang side rejects the write, the gateway returns HTTP 502 with an `erro
   - Expected message: `{write_seat, FromPid, EventId, SeatId}`
   - Reply: `{write_seat_reply, {EventId, SeatId}, ok | {error, Reason}}`
 - The Java gateway (JInterface) sends these messages to the registered process `seat_srv` on `res1@res1` and relays the reply to HTTP callers.
+
+## Quick Mnesia Checks (from host)
+Verify `seat_srv` is registered on `res1`:
+```bash
+docker exec -it res1 bash -lc \
+"erl -noshell -noinput -sname chk@res1 -setcookie ticketcookie -eval \
+'io:format(\"seat_srv pid = ~p~n\", [rpc:call(res1@res1, erlang, whereis, [seat_srv])]), halt().'"
+```
+Check the PID and current function:
+```bash
+docker exec -it res1 bash -lc \
+"erl -noshell -noinput -sname chk3@res1 -setcookie ticketcookie -eval \
+'Pid = rpc:call(res1@res1, erlang, whereis, [seat_srv]), \
+ io:format(\"pid=~p~n\", [Pid]), \
+ case Pid of \
+   undefined -> io:format(\"seat_srv not running~n\", []); \
+   _ -> io:format(\"cur_fun=~p~n\", [rpc:call(res1@res1, erlang, process_info, [Pid, current_function])]) \
+ end, halt().'"
+```
+Dump all `seat` keys/records:
+```bash
+docker exec -it res1 erl -noshell -noinput -sname dump@res1 -setcookie ticketcookie -eval '
+rpc:call(res1@res1, application, start, [mnesia]),
+Keys = rpc:call(res1@res1, mnesia, dirty_all_keys, [seat]),
+Records = [rpc:call(res1@res1, mnesia, dirty_read, [seat, K]) || K <- Keys],
+io:format("keys=~p~nrecords=~p~n", [Keys, Records]),
+halt().
+'
+```
