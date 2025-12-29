@@ -1,62 +1,150 @@
 package com.example.demo.service;
 
 import com.ericsson.otp.erlang.*;
+import com.example.demo.config.SeatRoutingProperties;
 import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Component
 public class JInterfaceClient {
 
-    // must match Erlang cookie
-    private static final String COOKIE = "ticketcookie";
-
-    // Erlang node + registered process
-    private static final String REMOTE_NODE = "res1@res1";
+    // Erlang registered process
     private static final String REMOTE_REG_NAME = "seat_srv";
-
-    // IMPORTANT: inside docker, use container hostname, NOT localhost
-    // If your spring container is named "gateway" -> java_gateway@gateway
-    private static final String LOCAL_NODE = "java_gateway@gateway";
+    private static final int PING_TIMEOUT_MS = 2000;
+    private static final long DOWN_COOLDOWN_MS = 10_000L;
 
     private OtpNode node;
+    private final SeatRoutingProperties routingProps;
+    private final Map<String, NodeHealth> healthByNode = new ConcurrentHashMap<>();
+
+    public JInterfaceClient(SeatRoutingProperties routingProps) {
+        this.routingProps = routingProps;
+    }
 
     @PostConstruct
     public void init() throws IOException {
         // Create exactly ONE node for the whole Spring app lifecycle
-        this.node = new OtpNode(LOCAL_NODE, COOKIE);
+        this.node = new OtpNode(routingProps.getLocalNode(), routingProps.getCookie());
         System.out.println("[JInterface] node up: " + node.node());
-        System.out.println("[JInterface] ping " + REMOTE_NODE + " => " + node.ping(REMOTE_NODE, 2000));
+        System.out.println("[JInterface] ping " + routingProps.getNodeRes1() + " => " + node.ping(routingProps.getNodeRes1(), PING_TIMEOUT_MS));
+        System.out.println("[JInterface] ping " + routingProps.getNodeRes2() + " => " + node.ping(routingProps.getNodeRes2(), PING_TIMEOUT_MS));
+        System.out.println("[JInterface] ping " + routingProps.getNodeRes3() + " => " + node.ping(routingProps.getNodeRes3(), PING_TIMEOUT_MS));
     }
 
     public WriteResult writeHold(String eventId, String seatId, String userId, Duration timeout) throws Exception {
-        // mailbox per request
-        OtpMbox mbox = node.createMbox();
         String corr = UUID.randomUUID().toString();
+        String lastError = null;
 
-        // Erlang seat_srv currently expects: {write_seat, FromPid, EventId, SeatId}
-        // so DO NOT send extra fields unless you update Erlang side.
-        OtpErlangTuple msg = new OtpErlangTuple(new OtpErlangObject[]{
-                new OtpErlangAtom("write_seat"),
-                mbox.self(),
-//                new OtpErlangBinary(eventId.getBytes()),
-//                new OtpErlangBinary(seatId.getBytes()),
-                new OtpErlangString(eventId),
-                new OtpErlangString(seatId)
+        for (String remoteNode : candidateNodesForSeatId(seatId)) {
+            if (!shouldTryNode(remoteNode)) {
+                continue;
+            }
+
+            boolean reachable = node.ping(remoteNode, PING_TIMEOUT_MS);
+            if (!reachable) {
+                markDown(remoteNode);
+                lastError = "node_unreachable:" + remoteNode;
+                continue;
+            }
+
+            // mailbox per attempt to avoid stale replies from previous node
+            OtpMbox mbox = node.createMbox();
+
+            // Erlang seat_srv currently expects: {write_seat, FromPid, EventId, SeatId}
+            // so DO NOT send extra fields unless you update Erlang side.
+            OtpErlangTuple msg = new OtpErlangTuple(new OtpErlangObject[]{
+                    new OtpErlangAtom("write_seat"),
+                    mbox.self(),
+                    new OtpErlangString(eventId),
+                    new OtpErlangString(seatId)
+            });
+
+            System.out.println("[JIF] route seatId=" + seatId + " -> " + remoteNode + " reachable=" + reachable);
+            System.out.println("[JIF] myPid=" + mbox.self() + " send=" + msg);
+
+            try {
+                mbox.send(REMOTE_REG_NAME, remoteNode, msg);
+                OtpErlangObject reply = mbox.receive(timeout.toMillis());
+                System.out.println("[JIF] rawReply=" + reply);
+
+                if (reply == null) {
+                    markDown(remoteNode);
+                    lastError = "timeout_waiting_reply:" + remoteNode;
+                    continue;
+                }
+
+                markUp(remoteNode);
+                return WriteResult.fromErlang(corr, reply);
+            } catch (Exception e) {
+                markDown(remoteNode);
+                lastError = "send_failed:" + remoteNode + ":" + e.getClass().getSimpleName();
+            }
+        }
+
+        if (lastError == null) {
+            lastError = "no_candidate_nodes";
+        }
+        return new WriteResult(false, corr, null, lastError);
+    }
+
+    private String routeNodeForSeatId(String seatId) {
+        if (seatId == null || seatId.isEmpty()) {
+            throw new IllegalArgumentException("seatId is required");
+        }
+        char prefix = Character.toUpperCase(seatId.charAt(0));
+        return switch (prefix) {
+            case 'A', 'B' -> routingProps.getNodeRes1();
+            case 'C', 'D' -> routingProps.getNodeRes2();
+            case 'E', 'F' -> routingProps.getNodeRes3();
+            default -> throw new IllegalArgumentException("Unsupported seat prefix: " + prefix);
+        };
+    }
+
+    private List<String> candidateNodesForSeatId(String seatId) {
+        String primary = routeNodeForSeatId(seatId);
+        if (primary.equals(routingProps.getNodeRes1())) {
+            return List.of(routingProps.getNodeRes1(), routingProps.getNodeRes2(), routingProps.getNodeRes3());
+        }
+        if (primary.equals(routingProps.getNodeRes2())) {
+            return List.of(routingProps.getNodeRes2(), routingProps.getNodeRes3(), routingProps.getNodeRes1());
+        }
+        return List.of(routingProps.getNodeRes3(), routingProps.getNodeRes1(), routingProps.getNodeRes2());
+    }
+
+    private boolean shouldTryNode(String nodeName) {
+        NodeHealth health = healthByNode.get(nodeName);
+        if (health == null) return true;
+        if (health.up) return true;
+        return (System.currentTimeMillis() - health.lastFailureMillis) >= DOWN_COOLDOWN_MS;
+    }
+
+    private void markDown(String nodeName) {
+        healthByNode.compute(nodeName, (k, v) -> {
+            if (v == null) v = new NodeHealth();
+            v.up = false;
+            v.lastFailureMillis = System.currentTimeMillis();
+            return v;
         });
+    }
 
-        System.out.println("[JIF] myPid=" + mbox.self() + " send=" + msg);
+    private void markUp(String nodeName) {
+        healthByNode.compute(nodeName, (k, v) -> {
+            if (v == null) v = new NodeHealth();
+            v.up = true;
+            return v;
+        });
+    }
 
-        mbox.send(REMOTE_REG_NAME, REMOTE_NODE, msg);
-
-        OtpErlangObject reply = mbox.receive(timeout.toMillis());
-        System.out.println("[JIF] rawReply=" + reply);
-
-        if (reply == null) return WriteResult.timeout(corr);
-        return WriteResult.fromErlang(corr, reply);
+    private static final class NodeHealth {
+        boolean up = true;
+        long lastFailureMillis;
     }
 
     public record WriteResult(boolean ok, String correlationId, String rawReply, String error) {
