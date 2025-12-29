@@ -61,7 +61,18 @@ If the Erlang side rejects the write, the gateway returns HTTP 502 with an `erro
 - Entry point: each container starts `seat_srv` via `reservation_core_sup`. The server exposes a message API:
   - Expected message: `{write_seat, FromPid, EventId, SeatId}`
   - Reply: `{write_seat_reply, {EventId, SeatId}, ok | {error, Reason}}`
-- The Java gateway (JInterface) sends these messages to the registered process `seat_srv` on `res1@res1` and relays the reply to HTTP callers.
+- The Java gateway (JInterface) sends these messages to the registered process `seat_srv` on the routed Erlang node and relays the reply to HTTP callers.
+
+## Routing & Failover (Gateway)
+- Primary routing (by seat prefix):
+  - `A/B` -> `res1@res1`
+  - `C/D` -> `res2@res2`
+  - `E/F` -> `res3@res3`
+- Failover order (deterministic, per primary):
+  - Primary `res1` -> `res1 -> res2 -> res3`
+  - Primary `res2` -> `res2 -> res3 -> res1`
+  - Primary `res3` -> `res3 -> res1 -> res2`
+- A node is marked down on ping failure or request timeout; it is retried after a short cooldown (10s). When it responds again, routing returns to the primary automatically.
 
 ## Quick Mnesia Checks (from host)
 Verify `seat_srv` is registered on `res1`:
