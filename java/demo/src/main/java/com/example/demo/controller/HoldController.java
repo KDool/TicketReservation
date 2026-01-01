@@ -20,9 +20,17 @@ public class HoldController {
     @PostMapping("/hold")
     public ResponseEntity<?> hold(@RequestParam(defaultValue = "E1") String eventId,
                                   @RequestParam(defaultValue = "A1") String seatId,
-                                  @RequestParam(defaultValue = "user1") String userId) throws Exception {
+                                  @RequestParam(defaultValue = "user1") String userId,
+                                  @RequestParam(defaultValue = "30") long holdSeconds) throws Exception {
 
-        var res = client.writeHold(eventId, seatId, userId, Duration.ofSeconds(3));
+        if (holdSeconds <= 0) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "status", "FAILED",
+                    "error", "holdSeconds must be > 0"
+            ));
+        }
+
+        var res = client.writeHold(eventId, seatId, userId, Duration.ofSeconds(holdSeconds));
 
         if (res.ok()) {
             return ResponseEntity.ok(Map.of(
@@ -30,6 +38,8 @@ public class HoldController {
                     "eventId", eventId,
                     "seatId", seatId,
                     "userId", userId,
+                    "holdId", res.holdId(),
+                    "expiresAtMillis", res.expiresAtMillis(),
                     "correlationId", res.correlationId(),
                     "reply", res.rawReply()
             ));

@@ -27,16 +27,34 @@ handle_cast(_Msg, State) ->
 %% =========================================================
 %% Message-passing API (used by JInterface and your Erlang test)
 %%
-%% Expected message:
-%%   {write_seat, FromPid, <<"E1">>, <<"A1">>}
+%% Expected message (gateway):
+%%   {hold_seat, FromPid, EventId, SeatId, UserId, HoldId, ExpiresAtMs}
 %%
 %% Reply:
-%%   {write_seat_reply, {EventId, SeatId}, ok | {error, Reason}}
-%% =========================================================
+%%   {hold_seat_reply, {EventId, SeatId},
+%%     {ok, HoldId, ExpiresAtMs} | {error, Reason}}
+%%
+%% Legacy support (tests / old clients):
+%%   {write_seat, FromPid, EventId, SeatId}
+%%   -> {write_seat_reply, {EventId, SeatId}, ok | {error, Reason}}
+%%   (mapped internally to a short-lived hold)
 handle_info({write_seat, FromPid, EventId, SeatId}, State) ->
-    io:format("seat_srv got write_seat ~p ~p from ~p~n", [EventId, SeatId, FromPid]),
-    Res = hold_tx(EventId, SeatId),
-    FromPid ! {write_seat_reply, {EventId, SeatId}, Res},
+    io:format("seat_srv got legacy write_seat ~p ~p from ~p~n", [EventId, SeatId, FromPid]),
+    Now = erlang:system_time(millisecond),
+    Res = hold_tx(EventId, SeatId, <<"legacy_user">>, <<"legacy_hold">>, Now + 5000),
+    LegacyReply = case Res of
+        {ok, _, _} -> ok;
+        {error, Reason} -> {error, Reason};
+        {error, Reason, _, _} -> {error, Reason}
+    end,
+    FromPid ! {write_seat_reply, {EventId, SeatId}, LegacyReply},
+    {noreply, State};
+
+handle_info({hold_seat, FromPid, EventId, SeatId, UserId, HoldId, ExpiresAtMs}, State) ->
+    io:format("seat_srv got hold_seat ~p ~p for user ~p exp=~p from ~p~n",
+              [EventId, SeatId, UserId, ExpiresAtMs, FromPid]),
+    Res = hold_tx(EventId, SeatId, UserId, HoldId, ExpiresAtMs),
+    FromPid ! {hold_seat_reply, {EventId, SeatId}, Res},
     {noreply, State};
 
 handle_info(Other, State) ->
@@ -46,20 +64,23 @@ handle_info(Other, State) ->
 terminate(_, _) -> ok.
 code_change(_, State, _) -> {ok, State}.
 
-%% free -> held (create if missing)
-hold_tx(EventId, SeatId) ->
+%% free/expired -> held (create if missing)
+hold_tx(EventId, SeatId, UserId, HoldId, ExpiresAtMs) ->
     Key = {EventId, SeatId},
+    Now = erlang:system_time(millisecond),
     Fun = fun() ->
         case mnesia:read(seat, Key) of
             [] ->
-                %% create new seat and mark held
-                mnesia:write({seat, Key, held, <<"U">>, <<"H">>, 0, undefined}),
-                ok;
-            [{seat, Key, free, U, H, E, O}] ->
-                mnesia:write({seat, Key, held, U, H, E, O}),
-                ok;
-            [{seat, Key, held, _, _, _, _}] ->
-                {error, already_held};
+                mnesia:write({seat, Key, held, UserId, HoldId, ExpiresAtMs, undefined}),
+                {ok, HoldId, ExpiresAtMs};
+            [{seat, Key, free, _, _, _, OrderId}] ->
+                mnesia:write({seat, Key, held, UserId, HoldId, ExpiresAtMs, OrderId}),
+                {ok, HoldId, ExpiresAtMs};
+            [{seat, Key, held, _, _, CurExp, OrderId}] when CurExp =< Now ->
+                mnesia:write({seat, Key, held, UserId, HoldId, ExpiresAtMs, OrderId}),
+                {ok, HoldId, ExpiresAtMs};
+            [{seat, Key, held, _, CurHoldId, CurExp, _}] ->
+                {error, {already_held, CurHoldId, CurExp}};
             [{seat, Key, sold, _, _, _, _}] ->
                 {error, already_sold}
         end

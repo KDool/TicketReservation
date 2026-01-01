@@ -38,8 +38,10 @@ public class JInterfaceClient {
         System.out.println("[JInterface] ping " + routingProps.getNodeRes3() + " => " + node.ping(routingProps.getNodeRes3(), PING_TIMEOUT_MS));
     }
 
-    public WriteResult writeHold(String eventId, String seatId, String userId, Duration timeout) throws Exception {
+    public WriteResult writeHold(String eventId, String seatId, String userId, Duration holdDuration) throws Exception {
         String corr = UUID.randomUUID().toString();
+        String holdId = UUID.randomUUID().toString();
+        long expiresAt = System.currentTimeMillis() + holdDuration.toMillis();
         String lastError = null;
 
         for (String remoteNode : candidateNodesForSeatId(seatId)) {
@@ -57,13 +59,14 @@ public class JInterfaceClient {
             // mailbox per attempt to avoid stale replies from previous node
             OtpMbox mbox = node.createMbox();
 
-            // Erlang seat_srv currently expects: {write_seat, FromPid, EventId, SeatId}
-            // so DO NOT send extra fields unless you update Erlang side.
             OtpErlangTuple msg = new OtpErlangTuple(new OtpErlangObject[]{
-                    new OtpErlangAtom("write_seat"),
+                    new OtpErlangAtom("hold_seat"),
                     mbox.self(),
                     new OtpErlangString(eventId),
-                    new OtpErlangString(seatId)
+                    new OtpErlangString(seatId),
+                    new OtpErlangString(userId),
+                    new OtpErlangString(holdId),
+                    new OtpErlangLong(expiresAt)
             });
 
             System.out.println("[JIF] route seatId=" + seatId + " -> " + remoteNode + " reachable=" + reachable);
@@ -71,7 +74,7 @@ public class JInterfaceClient {
 
             try {
                 mbox.send(REMOTE_REG_NAME, remoteNode, msg);
-                OtpErlangObject reply = mbox.receive(timeout.toMillis());
+                OtpErlangObject reply = mbox.receive(holdDuration.toMillis());
                 System.out.println("[JIF] rawReply=" + reply);
 
                 if (reply == null) {
@@ -91,7 +94,7 @@ public class JInterfaceClient {
         if (lastError == null) {
             lastError = "no_candidate_nodes";
         }
-        return new WriteResult(false, corr, null, lastError);
+        return new WriteResult(false, corr, null, lastError, holdId, expiresAt);
     }
 
     private String routeNodeForSeatId(String seatId) {
@@ -147,21 +150,45 @@ public class JInterfaceClient {
         long lastFailureMillis;
     }
 
-    public record WriteResult(boolean ok, String correlationId, String rawReply, String error) {
+    public record WriteResult(boolean ok,
+                              String correlationId,
+                              String rawReply,
+                              String error,
+                              String holdId,
+                              Long expiresAtMillis) {
         static WriteResult timeout(String corr) {
-            return new WriteResult(false, corr, null, "timeout_waiting_reply");
+            return new WriteResult(false, corr, null, "timeout_waiting_reply", null, null);
         }
 
         static WriteResult fromErlang(String corr, OtpErlangObject obj) {
             String raw = obj.toString();
             if (obj instanceof OtpErlangTuple tup && tup.arity() >= 3) {
-                OtpErlangObject status = tup.elementAt(2);
-                if (status instanceof OtpErlangAtom a && "ok".equals(a.atomValue())) {
-                    return new WriteResult(true, corr, raw, null);
+                OtpErlangObject payload = tup.elementAt(2);
+                if (payload instanceof OtpErlangTuple pt && pt.arity() >= 1) {
+                    OtpErlangObject status = pt.elementAt(0);
+                    if (status instanceof OtpErlangAtom a && "ok".equals(a.atomValue())) {
+                        String holdId = asString(pt.elementAt(1));
+                        Long expiresAt = asLong(pt.elementAt(2));
+                        return new WriteResult(true, corr, raw, null, holdId, expiresAt);
+                    }
+                    if (status instanceof OtpErlangAtom a && "error".equals(a.atomValue())) {
+                        String reason = pt.arity() > 1 ? pt.elementAt(1).toString() : "unknown_error";
+                        return new WriteResult(false, corr, raw, reason, null, null);
+                    }
                 }
-                return new WriteResult(false, corr, raw, "write_failed:" + status);
             }
-            return new WriteResult(false, corr, raw, "unexpected_reply_format");
+            return new WriteResult(false, corr, raw, "unexpected_reply_format", null, null);
+        }
+
+        private static String asString(OtpErlangObject obj) {
+            if (obj instanceof OtpErlangString s) return s.stringValue();
+            if (obj instanceof OtpErlangAtom a) return a.atomValue();
+            return obj == null ? null : obj.toString();
+        }
+
+        private static Long asLong(OtpErlangObject obj) {
+            if (obj instanceof OtpErlangLong l) return l.longValue();
+            return null;
         }
     }
 }
