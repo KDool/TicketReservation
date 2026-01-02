@@ -173,6 +173,23 @@ public class JInterfaceClient {
                     }
                     if (status instanceof OtpErlangAtom a && "error".equals(a.atomValue())) {
                         String reason = pt.arity() > 1 ? pt.elementAt(1).toString() : "unknown_error";
+
+                        // Check for user_already_holding_seat error tuple
+                        if (pt.arity() > 1) {
+                            OtpErlangObject reasonObj = pt.elementAt(1);
+                            if (reasonObj instanceof OtpErlangTuple rt && rt.arity() >= 1) {
+                                OtpErlangObject errorType = rt.elementAt(0);
+                                if (errorType instanceof OtpErlangAtom err && "user_already_holding_seat".equals(err.atomValue())) {
+                                    reason = "user_already_holding_seat";
+                                    if (rt.arity() >= 4) {
+                                        String expEventId = asString(rt.elementAt(1));
+                                        String expSeatId = asString(rt.elementAt(2));
+                                        reason += ":" + expEventId + ":" + expSeatId;
+                                    }
+                                }
+                            }
+                        }
+
                         return new WriteResult(false, corr, raw, reason, null, null);
                     }
                 }

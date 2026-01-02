@@ -51,9 +51,9 @@
            <version>1.14</version>
            <scope>system</scope>
            <systemPath>${project.basedir}/OtpErlang-otp26-java21-1.14.jar</systemPath>
-       </dependency>
-         -->
-        <dependency>
+       </dependency> -->
+
+     <dependency>
             <groupId>org.erlang</groupId>
             <artifactId>jinterface</artifactId>
             <version>1.14</version>
@@ -66,6 +66,9 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <includeSystemScope>true</includeSystemScope>
+                </configuration>
             </plugin>
         </plugins>
     </build>

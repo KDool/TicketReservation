@@ -65,24 +65,48 @@ terminate(_, _) -> ok.
 code_change(_, State, _) -> {ok, State}.
 
 %% free/expired -> held (create if missing)
+%% Also enforces: user can hold only one seat at a time
 hold_tx(EventId, SeatId, UserId, HoldId, ExpiresAtMs) ->
     Key = {EventId, SeatId},
     Now = erlang:system_time(millisecond),
     Fun = fun() ->
-        case mnesia:read(seat, Key) of
+        %% Step 1: Check if user already has an active hold
+        UserHoldsKey = {user_holds, UserId},
+        UserHoldsList = case mnesia:read(user_holds, UserHoldsKey) of
+            [] -> [];
+            [{user_holds, _, Holds}] -> Holds
+        end,
+        
+        %% Filter out expired holds and check for active hold
+        ActiveHolds = lists:filter(fun({_, _, Exp}) -> Exp > Now end, UserHoldsList),
+        
+        case ActiveHolds of
             [] ->
-                mnesia:write({seat, Key, held, UserId, HoldId, ExpiresAtMs, undefined}),
-                {ok, HoldId, ExpiresAtMs};
-            [{seat, Key, free, _, _, _, OrderId}] ->
-                mnesia:write({seat, Key, held, UserId, HoldId, ExpiresAtMs, OrderId}),
-                {ok, HoldId, ExpiresAtMs};
-            [{seat, Key, held, _, _, CurExp, OrderId}] when CurExp =< Now ->
-                mnesia:write({seat, Key, held, UserId, HoldId, ExpiresAtMs, OrderId}),
-                {ok, HoldId, ExpiresAtMs};
-            [{seat, Key, held, _, CurHoldId, CurExp, _}] ->
-                {error, {already_held, CurHoldId, CurExp}};
-            [{seat, Key, sold, _, _, _, _}] ->
-                {error, already_sold}
+                %% No active hold for this user, proceed with seat hold
+                case mnesia:read(seat, Key) of
+                    [] ->
+                        %% New seat
+                        mnesia:write({seat, Key, held, UserId, HoldId, ExpiresAtMs, undefined}),
+                        mnesia:write({user_holds, UserHoldsKey, [{EventId, SeatId, ExpiresAtMs} | UserHoldsList]}),
+                        {ok, HoldId, ExpiresAtMs};
+                    [{seat, Key, free, _, _, _, OrderId}] ->
+                        mnesia:write({seat, Key, held, UserId, HoldId, ExpiresAtMs, OrderId}),
+                        mnesia:write({user_holds, UserHoldsKey, [{EventId, SeatId, ExpiresAtMs} | UserHoldsList]}),
+                        {ok, HoldId, ExpiresAtMs};
+                    [{seat, Key, held, _, _, CurExp, OrderId}] when CurExp =< Now ->
+                        %% Seat hold expired, reclaim it
+                        mnesia:write({seat, Key, held, UserId, HoldId, ExpiresAtMs, OrderId}),
+                        mnesia:write({user_holds, UserHoldsKey, [{EventId, SeatId, ExpiresAtMs} | UserHoldsList]}),
+                        {ok, HoldId, ExpiresAtMs};
+                    [{seat, Key, held, _, CurHoldId, CurExp, _}] ->
+                        {error, {seat_already_held, CurHoldId, CurExp}};
+                    [{seat, Key, sold, _, _, _, _}] ->
+                        {error, seat_already_sold}
+                end;
+            [ActiveHold | _] ->
+                %% User already has an active hold
+                {ExpEventId, ExpSeatId, ExpExp} = ActiveHold,
+                {error, {user_already_holding_seat, ExpEventId, ExpSeatId, ExpExp}}
         end
     end,
     case mnesia:transaction(Fun) of
