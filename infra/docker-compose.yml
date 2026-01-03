@@ -138,7 +138,8 @@ services:
       - erlangnet
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      KAFKA_TOPIC: reservation.confirmations
+      KAFKA_CONFIRM_TOPIC: reservation.confirmations
+      KAFKA_EXPIRED_TOPIC: hold.expired
       GOOGLE_CHAT_WEBHOOK_URL: https://chat.googleapis.com/v1/spaces/AAQAj1AwqAo/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=zezIgKfIu5wz1Ww5rEQdzFc2tRskQPylucG5dy3jNI8
 
 

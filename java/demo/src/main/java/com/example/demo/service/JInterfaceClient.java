@@ -23,10 +23,13 @@ public class JInterfaceClient {
 
     private OtpNode node;
     private final SeatRoutingProperties routingProps;
+    private final KafkaEventPublisher kafkaEventPublisher;
     private final Map<String, NodeHealth> healthByNode = new ConcurrentHashMap<>();
 
-    public JInterfaceClient(SeatRoutingProperties routingProps) {
+    public JInterfaceClient(SeatRoutingProperties routingProps, 
+                           KafkaEventPublisher kafkaEventPublisher) {
         this.routingProps = routingProps;
+        this.kafkaEventPublisher = kafkaEventPublisher;
     }
 
     @PostConstruct
@@ -95,15 +98,19 @@ public class JInterfaceClient {
     private void handleHoldExpired(OtpErlangObject metadataObj) {
         try {
             System.out.println("[JInterface] Received hold_expired: " + metadataObj);
-            // TODO: Publish to Kafka topic for worker to process
-            // For now, just log it
+            
             if (metadataObj instanceof OtpErlangMap map) {
                 String eventId = extractMapValue(map, "event_id");
                 String seatId = extractMapValue(map, "seat_id");
                 String userId = extractMapValue(map, "user_id");
                 String holdId = extractMapValue(map, "hold_id");
+                Long expiredAt = extractMapLong(map, "expired_at");
+                
                 System.out.println("[JInterface] Hold expired - eventId=" + eventId + 
                     " seatId=" + seatId + " userId=" + userId + " holdId=" + holdId);
+                
+                // Publish to Kafka for worker to process
+                kafkaEventPublisher.publishHoldExpired(eventId, seatId, userId, holdId, expiredAt);
             }
         } catch (Exception e) {
             System.err.println("[JInterface] Error handling hold_expired: " + e.getMessage());
@@ -114,6 +121,15 @@ public class JInterfaceClient {
         try {
             OtpErlangObject value = map.get(new OtpErlangAtom(key));
             return asString(value);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+    
+    private Long extractMapLong(OtpErlangMap map, String key) {
+        try {
+            OtpErlangObject value = map.get(new OtpErlangAtom(key));
+            return asLong(value);
         } catch (Exception e) {
             return null;
         }

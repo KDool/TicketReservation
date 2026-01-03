@@ -16,13 +16,15 @@ public class HoldController {
         this.client = client;
     }
 
-    // POST /hold -> writes seat "E1","A1" as held
+    // POST /hold -> writes seat as held
     @PostMapping("/hold")
-    public ResponseEntity<?> hold(@RequestParam(defaultValue = "E1") String eventId,
-                                  @RequestParam(defaultValue = "A1") String seatId,
-                                  @RequestParam(defaultValue = "user1") String userId,
-                                  @RequestParam(defaultValue = "30") long holdSeconds) throws Exception {
+    public ResponseEntity<?> hold(@RequestBody Map<String, Object> request,
+                                  @RequestParam(defaultValue = "5") long holdSeconds) throws Exception {
 
+        String eventId = (String) request.getOrDefault("eventId", "E1");
+        String seatId = (String) request.getOrDefault("seatId", "A1");
+        String userId = (String) request.getOrDefault("userId", "user1");
+        
         if (holdSeconds <= 0) {
             return ResponseEntity.badRequest().body(Map.of(
                     "status", "FAILED",
