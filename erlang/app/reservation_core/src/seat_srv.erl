@@ -29,10 +29,13 @@ handle_cast(_Msg, State) ->
 %%
 %% Expected message (gateway):
 %%   {hold_seat, FromPid, EventId, SeatId, UserId, HoldId, ExpiresAtMs}
+%%   {confirm_hold, FromPid, UserId, HoldId}
 %%
 %% Reply:
 %%   {hold_seat_reply, {EventId, SeatId},
 %%     {ok, HoldId, ExpiresAtMs} | {error, Reason}}
+%%   {confirm_hold_reply, {EventId, SeatId},
+%%     {ok, OrderId} | {error, Reason}}
 %%
 %% Legacy support (tests / old clients):
 %%   {write_seat, FromPid, EventId, SeatId}
@@ -55,6 +58,13 @@ handle_info({hold_seat, FromPid, EventId, SeatId, UserId, HoldId, ExpiresAtMs}, 
               [EventId, SeatId, UserId, ExpiresAtMs, FromPid]),
     Res = hold_tx(EventId, SeatId, UserId, HoldId, ExpiresAtMs),
     FromPid ! {hold_seat_reply, {EventId, SeatId}, Res},
+    {noreply, State};
+
+handle_info({confirm_hold, FromPid, UserId, HoldId}, State) ->
+    io:format("seat_srv got confirm_hold holdId=~p user=~p from ~p~n",
+              [HoldId, UserId, FromPid]),
+    {ReplyKey, Res} = confirm_tx(UserId, HoldId),
+    FromPid ! {confirm_hold_reply, ReplyKey, Res},
     {noreply, State};
 
 handle_info(Other, State) ->
@@ -113,3 +123,56 @@ hold_tx(EventId, SeatId, UserId, HoldId, ExpiresAtMs) ->
         {atomic, R} -> R;
         {aborted, Reason} -> {error, {tx_aborted, Reason}}
     end.
+
+confirm_tx(UserId, HoldId) ->
+    Now = erlang:system_time(millisecond),
+    Fun = fun() ->
+        case find_seat_by_hold_id(HoldId) of
+            not_found ->
+                {{undefined, undefined}, {error, hold_not_found}};
+            {seat, Key = {EventId, SeatId}, State, SeatUserId, HoldId, ExpiresAt, _OrderId} ->
+                case State of
+                    sold ->
+                        {{EventId, SeatId}, {error, seat_already_sold}};
+                    held ->
+                        case SeatUserId =:= UserId of
+                            false ->
+                                {{EventId, SeatId}, {error, user_mismatch}};
+                            true when ExpiresAt =< Now ->
+                                {{EventId, SeatId}, {error, hold_expired}};
+                            true ->
+                                OrderId = make_order_id(),
+                                mnesia:write({seat, Key, sold, UserId, HoldId, ExpiresAt, OrderId}),
+                                remove_user_hold(UserId, EventId, SeatId),
+                                {{EventId, SeatId}, {ok, OrderId}}
+                        end;
+                    free ->
+                        {{EventId, SeatId}, {error, hold_expired}}
+                end
+        end
+    end,
+    case mnesia:transaction(Fun) of
+        {atomic, R} -> R;
+        {aborted, Reason} -> {{undefined, undefined}, {error, {tx_aborted, Reason}}}
+    end.
+
+find_seat_by_hold_id(HoldId) ->
+    Match = [{{seat, '$1', '$2', '$3', HoldId, '$5', '$6'}, [], ['$_']}],
+    case mnesia:select(seat, Match) of
+        [] -> not_found;
+        [Seat | _] -> Seat
+    end.
+
+remove_user_hold(UserId, EventId, SeatId) ->
+    UserKey = {user_holds, UserId},
+    case mnesia:read(user_holds, UserKey) of
+        [] -> ok;
+        [{user_holds, UserKey, Holds}] ->
+            Filtered = [H || H = {E, S, _Exp} <- Holds, not (E =:= EventId andalso S =:= SeatId)],
+            mnesia:write({user_holds, UserKey, Filtered}),
+            ok
+    end.
+
+make_order_id() ->
+    OrderNum = erlang:unique_integer([monotonic, positive]),
+    lists:concat(["order_", integer_to_list(OrderNum)]).

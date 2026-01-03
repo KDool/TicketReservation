@@ -18,6 +18,7 @@ public class JInterfaceClient {
     // Erlang registered process
     private static final String REMOTE_REG_NAME = "seat_srv";
     private static final int PING_TIMEOUT_MS = 2000;
+    private static final int CONFIRM_TIMEOUT_MS = 3000;
     private static final long DOWN_COOLDOWN_MS = 10_000L;
 
     private OtpNode node;
@@ -95,6 +96,63 @@ public class JInterfaceClient {
             lastError = "no_candidate_nodes";
         }
         return new WriteResult(false, corr, null, lastError, holdId, expiresAt);
+    }
+
+    public ConfirmResult confirmHold(String userId, String holdId) throws Exception {
+        String corr = UUID.randomUUID().toString();
+        String lastError = null;
+        List<String> nodes = List.of(
+                routingProps.getNodeRes1(),
+                routingProps.getNodeRes2(),
+                routingProps.getNodeRes3()
+        );
+
+        for (String remoteNode : nodes) {
+            if (!shouldTryNode(remoteNode)) {
+                continue;
+            }
+
+            boolean reachable = node.ping(remoteNode, PING_TIMEOUT_MS);
+            if (!reachable) {
+                markDown(remoteNode);
+                lastError = "node_unreachable:" + remoteNode;
+                continue;
+            }
+
+            OtpMbox mbox = node.createMbox();
+            OtpErlangTuple msg = new OtpErlangTuple(new OtpErlangObject[]{
+                    new OtpErlangAtom("confirm_hold"),
+                    mbox.self(),
+                    new OtpErlangString(userId),
+                    new OtpErlangString(holdId)
+            });
+
+            System.out.println("[JIF] confirm holdId=" + holdId + " -> " + remoteNode + " reachable=" + reachable);
+            System.out.println("[JIF] myPid=" + mbox.self() + " send=" + msg);
+
+            try {
+                mbox.send(REMOTE_REG_NAME, remoteNode, msg);
+                OtpErlangObject reply = mbox.receive(CONFIRM_TIMEOUT_MS);
+                System.out.println("[JIF] rawReply=" + reply);
+
+                if (reply == null) {
+                    markDown(remoteNode);
+                    lastError = "timeout_waiting_reply:" + remoteNode;
+                    continue;
+                }
+
+                markUp(remoteNode);
+                return ConfirmResult.fromErlang(corr, reply);
+            } catch (Exception e) {
+                markDown(remoteNode);
+                lastError = "send_failed:" + remoteNode + ":" + e.getClass().getSimpleName();
+            }
+        }
+
+        if (lastError == null) {
+            lastError = "no_candidate_nodes";
+        }
+        return new ConfirmResult(false, corr, null, lastError, null, null, null);
     }
 
     private String routeNodeForSeatId(String seatId) {
@@ -196,16 +254,58 @@ public class JInterfaceClient {
             }
             return new WriteResult(false, corr, raw, "unexpected_reply_format", null, null);
         }
+    }
 
-        private static String asString(OtpErlangObject obj) {
-            if (obj instanceof OtpErlangString s) return s.stringValue();
-            if (obj instanceof OtpErlangAtom a) return a.atomValue();
-            return obj == null ? null : obj.toString();
+    public record ConfirmResult(boolean ok,
+                                String correlationId,
+                                String rawReply,
+                                String error,
+                                String orderId,
+                                String eventId,
+                                String seatId) {
+        static ConfirmResult fromErlang(String corr, OtpErlangObject obj) {
+            String raw = obj == null ? null : obj.toString();
+            if (obj instanceof OtpErlangTuple tup && tup.arity() >= 3) {
+                String eventId = null;
+                String seatId = null;
+                OtpErlangObject keyObj = tup.elementAt(1);
+                if (keyObj instanceof OtpErlangTuple keyTup && keyTup.arity() >= 2) {
+                    eventId = normalizeUndefined(asString(keyTup.elementAt(0)));
+                    seatId = normalizeUndefined(asString(keyTup.elementAt(1)));
+                }
+
+                OtpErlangObject payload = tup.elementAt(2);
+                if (payload instanceof OtpErlangTuple pt && pt.arity() >= 1) {
+                    OtpErlangObject status = pt.elementAt(0);
+                    if (status instanceof OtpErlangAtom a && "ok".equals(a.atomValue())) {
+                        String orderId = pt.arity() > 1 ? asString(pt.elementAt(1)) : null;
+                        return new ConfirmResult(true, corr, raw, null, orderId, eventId, seatId);
+                    }
+                    if (status instanceof OtpErlangAtom a && "error".equals(a.atomValue())) {
+                        String reason = pt.arity() > 1 ? asString(pt.elementAt(1)) : "unknown_error";
+                        return new ConfirmResult(false, corr, raw, reason, null, eventId, seatId);
+                    }
+                }
+            }
+            return new ConfirmResult(false, corr, raw, "unexpected_reply_format", null, null, null);
         }
+    }
 
-        private static Long asLong(OtpErlangObject obj) {
-            if (obj instanceof OtpErlangLong l) return l.longValue();
+    private static String asString(OtpErlangObject obj) {
+        if (obj instanceof OtpErlangString s) return s.stringValue();
+        if (obj instanceof OtpErlangAtom a) return a.atomValue();
+        return obj == null ? null : obj.toString();
+    }
+
+    private static Long asLong(OtpErlangObject obj) {
+        if (obj instanceof OtpErlangLong l) return l.longValue();
+        return null;
+    }
+
+    private static String normalizeUndefined(String value) {
+        if ("undefined".equals(value)) {
             return null;
         }
+        return value;
     }
 }

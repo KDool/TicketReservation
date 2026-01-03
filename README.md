@@ -54,6 +54,19 @@ Expected JSON on success (HTTP 200):
 ```
 If the Erlang side rejects the write, the gateway returns HTTP 502 with an `error` field (e.g., `already_held` or `timeout_waiting_reply`).
 
+Confirm a hold (purchase) with a JSON body:
+```bash
+curl -X POST "http://localhost:8080/reservations/confirm" \
+  -H "Content-Type: application/json" \
+  -d '{"userId":"user1","holdId":"uuid-from-hold-response"}'
+```
+Success Response:
+- Code: 200 OK
+Error Responses:
+- 409 Conflict: Hold has already expired or seat is already sold.
+- 403 Forbidden: User ID does not match the original holder.
+- 404 Not Found: Hold ID is invalid.
+
 ## Erlang Core (mnesia + seat server)
 - Nodes: three Erlang nodes `res1@res1`, `res2@res2`, `res3@res3` (hostnames come from Docker Compose). They all share the same cookie `ticketcookie`.
 - Mnesia bootstrap: only `res1` runs `init_mnesia:bootstrap/3` once to create the schema/table and writes a marker file in its mnesia volume. Followers wait for the marker, then start mnesia and join the cluster.
