@@ -38,20 +38,35 @@ The fat jar lands in `java/demo/target/demo-0.0.1-SNAPSHOT.jar`.
 
 ## Quick Commands (Copy & Paste)
 
-### 1. Create a Hold
+### 1. Create a Hold (A/B seats → res1)
 ```bash
 curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"E1","seatId":"A1","userId":"user1","holdSeconds":600}' | jq '.'
 ```
 
-### 2. Check Seat Status
+### 2. Create a Hold (C/D seats → res2)
+```bash
+curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"E2","seatId":"C5","userId":"user2","holdSeconds":600}' | jq '.'
+```
+
+### 3. Create a Hold (E/F seats → res3)
+```bash
+curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"E3","seatId":"E9","userId":"user3","holdSeconds":600}' | jq '.'
+```
+
+### 4. Check Seat Status
 ```bash
 curl -s "http://localhost:8080/check?eventId=E1&seatId=A1" | jq '.'
 ```
 
-### 3. Confirm a Hold (Purchase)
+### 5. Confirm a Hold (Purchase)
 ```bash
 curl -s -X POST "http://localhost:8080/reservations/confirm" -H "Content-Type: application/json" -d '{"userId":"user1","holdId":"HOLD_ID_HERE"}' | jq '.'
 ```
+
+**Note:** SeatId prefix determines routing:
+- `A/B` → Erlang node `res1@res1`
+- `C/D` → Erlang node `res2@res2`
+- `E/F` → Erlang node `res3@res3`
 
 ## Test the API (Detailed)
 With the stack running (gateway on `localhost:8080`), you can:
@@ -147,6 +162,43 @@ Expected output:
 ✓ Hold created: <uuid>
   Waiting 9 seconds for expiration...
 ✓ After expiration - status: expired
+```
+
+## Seat Routing Test: Verify Distribution Across Nodes (Copy this command)
+
+The gateway routes requests based on **seatId prefix** to distribute load across 3 Erlang nodes:
+- **A/B** → `res1@res1`
+- **C/D** → `res2@res2`  
+- **E/F** → `res3@res3`
+
+```bash
+echo "A/B → res1:" && curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"R1","seatId":"A10","userId":"r-a10","holdSeconds":60}' | jq '.seatId, .status' && curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"R2","seatId":"B11","userId":"r-b11","holdSeconds":60}' | jq '.seatId, .status' && echo "" && echo "C/D → res2:" && curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"R3","seatId":"C12","userId":"r-c12","holdSeconds":60}' | jq '.seatId, .status' && curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"R4","seatId":"D13","userId":"r-d13","holdSeconds":60}' | jq '.seatId, .status' && echo "" && echo "E/F → res3:" && curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"R5","seatId":"E14","userId":"r-e14","holdSeconds":60}' | jq '.seatId, .status' && curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"R6","seatId":"F15","userId":"r-f15","holdSeconds":60}' | jq '.seatId, .status'
+```
+
+Expected output:
+```
+A/B → res1:
+"A10"
+"OK"
+"B11"
+"OK"
+
+C/D → res2:
+"C12"
+"OK"
+"D13"
+"OK"
+
+E/F → res3:
+"E14"
+"OK"
+"F15"
+"OK"
+```
+
+Verify routing in gateway logs:
+```bash
+docker logs gateway 2>&1 | grep "route seatId" | tail -6
 ```
 
 ## Erlang Core (mnesia + seat server)
