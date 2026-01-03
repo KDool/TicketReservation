@@ -21,11 +21,14 @@ public class JInterfaceClient {
     private static final long DOWN_COOLDOWN_MS = 10_000L;
 
     private OtpNode node;
+    private OtpMbox notificationMbox;
     private final SeatRoutingProperties routingProps;
     private final Map<String, NodeHealth> healthByNode = new ConcurrentHashMap<>();
+    private final KafkaEventPublisher kafkaPublisher;
 
-    public JInterfaceClient(SeatRoutingProperties routingProps) {
+    public JInterfaceClient(SeatRoutingProperties routingProps, KafkaEventPublisher kafkaPublisher) {
         this.routingProps = routingProps;
+        this.kafkaPublisher = kafkaPublisher;
     }
 
     @PostConstruct
@@ -36,6 +39,66 @@ public class JInterfaceClient {
         System.out.println("[JInterface] ping " + routingProps.getNodeRes1() + " => " + node.ping(routingProps.getNodeRes1(), PING_TIMEOUT_MS));
         System.out.println("[JInterface] ping " + routingProps.getNodeRes2() + " => " + node.ping(routingProps.getNodeRes2(), PING_TIMEOUT_MS));
         System.out.println("[JInterface] ping " + routingProps.getNodeRes3() + " => " + node.ping(routingProps.getNodeRes3(), PING_TIMEOUT_MS));
+
+        // Register notification mailbox and start listening for hold_expired events
+        this.notificationMbox = node.createMbox("java_gateway_notify");
+        System.out.println("[JInterface] notification mbox: " + notificationMbox.self());
+        
+        // Register with seat_srv on all nodes using the notification mailbox
+        for (String remoteNode : List.of(routingProps.getNodeRes1(), routingProps.getNodeRes2(), routingProps.getNodeRes3())) {
+            try {
+                OtpErlangTuple msg = new OtpErlangTuple(new OtpErlangObject[]{
+                        new OtpErlangAtom("register_gateway"),
+                        notificationMbox.self()
+                });
+                System.out.println("[JInterface] sending register_gateway to " + remoteNode + " with mbox " + notificationMbox.self());
+                notificationMbox.send(REMOTE_REG_NAME, remoteNode, msg);
+                System.out.println("[JInterface] sent register_gateway to " + remoteNode);
+            } catch (Exception e) {
+                System.err.println("[JInterface] failed to register with " + remoteNode + ": " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
+
+        // Start listener thread for hold_expired events
+        startHoldExpiredListener();
+    }
+
+    private void startHoldExpiredListener() {
+        Thread listener = new Thread(() -> {
+            System.out.println("[JInterface] hold_expired listener started on mbox: " + notificationMbox.self());
+            while (true) {
+                try {
+                    OtpErlangObject msg = notificationMbox.receive(5000);
+                    if (msg != null) {
+                        System.out.println("[JInterface] received msg: " + msg);
+                        if (msg instanceof OtpErlangTuple tup) {
+                            System.out.println("[JInterface] tuple arity: " + tup.arity());
+                            if (tup.arity() == 6) {
+                                OtpErlangObject cmd = tup.elementAt(0);
+                                if (cmd instanceof OtpErlangAtom atom && "hold_expired".equals(atom.atomValue())) {
+                                    String eventId = asString(tup.elementAt(1));
+                                    String seatId = asString(tup.elementAt(2));
+                                    String userId = asString(tup.elementAt(3));
+                                    String holdId = asString(tup.elementAt(4));
+                                    long expiresAt = asLong(tup.elementAt(5));
+                                    
+                                    System.out.println("[JInterface] received hold_expired for " + eventId + ":" + seatId + " user=" + userId);
+                                    kafkaPublisher.publishHoldExpired(eventId, seatId, userId, holdId, expiresAt);
+                                }
+                            }
+                        }
+                    }
+                } catch (OtpErlangExit e) {
+                    System.err.println("[JInterface] mailbox exit: " + e.getMessage());
+                } catch (Exception e) {
+                    System.err.println("[JInterface] listener error: " + e.getMessage());
+                    e.printStackTrace();
+                }
+            }
+        }, "HoldExpiredListener");
+        listener.setDaemon(true);
+        listener.start();
     }
 
     public WriteResult writeHold(String eventId, String seatId, String userId, Duration holdDuration) throws Exception {
@@ -97,6 +160,57 @@ public class JInterfaceClient {
         return new WriteResult(false, corr, null, lastError, holdId, expiresAt);
     }
 
+    public CheckSeatResult checkSeat(String eventId, String seatId) throws Exception {
+        String corr = UUID.randomUUID().toString();
+        String lastError = null;
+
+        for (String remoteNode : candidateNodesForSeatId(seatId)) {
+            if (!shouldTryNode(remoteNode)) {
+                continue;
+            }
+
+            boolean reachable = node.ping(remoteNode, PING_TIMEOUT_MS);
+            if (!reachable) {
+                markDown(remoteNode);
+                lastError = "node_unreachable:" + remoteNode;
+                continue;
+            }
+
+            OtpMbox mbox = node.createMbox();
+
+            OtpErlangTuple msg = new OtpErlangTuple(new OtpErlangObject[]{
+                    new OtpErlangAtom("check_seat"),
+                    mbox.self(),
+                    new OtpErlangString(eventId),
+                    new OtpErlangString(seatId)
+            });
+
+            System.out.println("[JIF] checkSeat route seatId=" + seatId + " -> " + remoteNode);
+
+            try {
+                mbox.send(REMOTE_REG_NAME, remoteNode, msg);
+                OtpErlangObject reply = mbox.receive(3000);
+
+                if (reply == null) {
+                    markDown(remoteNode);
+                    lastError = "timeout_waiting_reply:" + remoteNode;
+                    continue;
+                }
+
+                markUp(remoteNode);
+                return CheckSeatResult.fromErlang(corr, reply);
+            } catch (Exception e) {
+                markDown(remoteNode);
+                lastError = "send_failed:" + remoteNode + ":" + e.getClass().getSimpleName();
+            }
+        }
+
+        if (lastError == null) {
+            lastError = "no_candidate_nodes";
+        }
+        return new CheckSeatResult(false, corr, null, lastError, null, null, null, null);
+    }
+
     private String routeNodeForSeatId(String seatId) {
         if (seatId == null || seatId.isEmpty()) {
             throw new IllegalArgumentException("seatId is required");
@@ -150,6 +264,17 @@ public class JInterfaceClient {
         long lastFailureMillis;
     }
 
+    private static String asString(OtpErlangObject obj) {
+        if (obj instanceof OtpErlangString s) return s.stringValue();
+        if (obj instanceof OtpErlangAtom a) return a.atomValue();
+        return obj == null ? null : obj.toString();
+    }
+
+    private static Long asLong(OtpErlangObject obj) {
+        if (obj instanceof OtpErlangLong l) return l.longValue();
+        return null;
+    }
+
     public record WriteResult(boolean ok,
                               String correlationId,
                               String rawReply,
@@ -195,6 +320,49 @@ public class JInterfaceClient {
                 }
             }
             return new WriteResult(false, corr, raw, "unexpected_reply_format", null, null);
+        }
+
+        private static String asString(OtpErlangObject obj) {
+            if (obj instanceof OtpErlangString s) return s.stringValue();
+            if (obj instanceof OtpErlangAtom a) return a.atomValue();
+            return obj == null ? null : obj.toString();
+        }
+
+        private static Long asLong(OtpErlangObject obj) {
+            if (obj instanceof OtpErlangLong l) return l.longValue();
+            return null;
+        }
+    }
+
+    public record CheckSeatResult(boolean ok,
+                                  String correlationId,
+                                  String rawReply,
+                                  String error,
+                                  String seatState,
+                                  String userId,
+                                  String holdId,
+                                  Long expiresAtMillis) {
+
+        static CheckSeatResult fromErlang(String corr, OtpErlangObject obj) {
+            String raw = obj.toString();
+            if (obj instanceof OtpErlangTuple tup && tup.arity() >= 3) {
+                OtpErlangObject payload = tup.elementAt(2);
+                if (payload instanceof OtpErlangTuple pt && pt.arity() >= 1) {
+                    OtpErlangObject status = pt.elementAt(0);
+                    if (status instanceof OtpErlangAtom a && "ok".equals(a.atomValue())) {
+                        String state = pt.arity() > 1 ? asString(pt.elementAt(1)) : null;
+                        String userId = pt.arity() > 2 ? asString(pt.elementAt(2)) : null;
+                        String holdId = pt.arity() > 3 ? asString(pt.elementAt(3)) : null;
+                        Long expiresAt = pt.arity() > 4 ? asLong(pt.elementAt(4)) : null;
+                        return new CheckSeatResult(true, corr, raw, null, state, userId, holdId, expiresAt);
+                    }
+                    if (status instanceof OtpErlangAtom a && "error".equals(a.atomValue())) {
+                        String reason = pt.arity() > 1 ? pt.elementAt(1).toString() : "unknown_error";
+                        return new CheckSeatResult(false, corr, raw, reason, null, null, null, null);
+                    }
+                }
+            }
+            return new CheckSeatResult(false, corr, raw, "unexpected_reply_format", null, null, null, null);
         }
 
         private static String asString(OtpErlangObject obj) {

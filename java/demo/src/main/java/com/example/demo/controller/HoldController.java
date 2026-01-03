@@ -49,6 +49,32 @@ public class HoldController {
                 "error", res.error(),
                 "correlationId", res.correlationId(),
                 "reply", String.valueOf(res.rawReply())
+        ));    }
+
+    // GET /hold/check -> check if a hold is still active
+    @GetMapping("/hold/check")
+    public ResponseEntity<?> checkHold(@RequestParam String eventId,
+                                       @RequestParam String seatId) throws Exception {
+        long now = System.currentTimeMillis();
+        var res = client.checkSeat(eventId, seatId);
+
+        if (res.ok()) {
+            return ResponseEntity.ok(Map.of(
+                    "status", "OK",
+                    "eventId", eventId,
+                    "seatId", seatId,
+                    "seatState", res.seatState(),
+                    "userId", res.userId(),
+                    "holdId", res.holdId(),
+                    "expiresAtMillis", res.expiresAtMillis(),
+                    "isExpired", res.expiresAtMillis() != null && res.expiresAtMillis() <= now,
+                    "correlationId", res.correlationId()
+            ));
+        }
+        return ResponseEntity.status(502).body(Map.of(
+                "status", "FAILED",
+                "error", res.error(),
+                "correlationId", res.correlationId()
         ));
-    }
-}
+    }    }
+    

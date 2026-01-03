@@ -79,6 +79,7 @@ services:
   #     - res1
   #     - res2
   #     - res3
+
   gateway:
     build: ../java/demo
     container_name: gateway
@@ -87,6 +88,7 @@ services:
       - res1
       - res2
       - res3
+      - kafka
     networks:
       - erlangnet
     ports:
@@ -95,12 +97,52 @@ services:
     environment:
       ERLANG_COOKIE: ticketcookie
 
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    hostname: kafka
+    networks:
+      - erlangnet
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    depends_on:
+      - zookeeper
 
-networks:
-  erlangnet:
-    driver: bridge
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    hostname: zookeeper
+    networks:
+      - erlangnet
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_SYNC_LIMIT: 2
+      ZOOKEEPER_INIT_LIMIT: 5
+
+  worker:
+    build: ../java/worker
+    container_name: worker
+    hostname: worker
+    depends_on:
+      - kafka
+    networks:
+      - erlangnet
+    environment:
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    restart: on-failure
 
 volumes:
   mnesia_res1:
   mnesia_res2:
   mnesia_res3:
+
+networks:
+  erlangnet:
+    driver: bridge
