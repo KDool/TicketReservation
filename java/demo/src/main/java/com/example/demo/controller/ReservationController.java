@@ -1,6 +1,7 @@
 package com.example.demo.controller;
 
 import com.example.demo.service.JInterfaceClient;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -21,14 +22,17 @@ public class ReservationController {
     private static final Logger log = LoggerFactory.getLogger(ReservationController.class);
 
     private final JInterfaceClient client;
-    private final KafkaTemplate<Object, Object> kafkaTemplate;
+    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final ObjectMapper objectMapper;
     private final String confirmTopic;
 
     public ReservationController(JInterfaceClient client,
-                                 KafkaTemplate<Object, Object> kafkaTemplate,
+                                 KafkaTemplate<String, String> kafkaTemplate,
+                                 ObjectMapper objectMapper,
                                  @Value("${app.kafka.confirm-topic}") String confirmTopic) {
         this.client = client;
         this.kafkaTemplate = kafkaTemplate;
+        this.objectMapper = objectMapper;
         this.confirmTopic = confirmTopic;
     }
 
@@ -65,14 +69,22 @@ public class ReservationController {
     }
 
     private void publishConfirmEvent(String userId, String eventId, String seatId, String orderId, String error) {
-        ConfirmEvent event = new ConfirmEvent(userId, eventId, seatId, orderId, error);
-        kafkaTemplate.send(confirmTopic, userId, event)
-                .whenComplete((result, ex) -> {
-                    if (ex != null) {
-                        log.warn("Failed to publish confirm event for userId={} holdResult orderId={} error={}",
-                                userId, orderId, error, ex);
-                    }
-                });
+        try {
+            ConfirmEvent event = new ConfirmEvent(userId, eventId, seatId, orderId, error);
+            String eventJson = objectMapper.writeValueAsString(event);
+            kafkaTemplate.send(confirmTopic, userId, eventJson)
+                    .whenComplete((result, ex) -> {
+                        if (ex != null) {
+                            log.warn("Failed to publish confirm event for userId={} orderId={} error={}",
+                                    userId, orderId, error, ex);
+                        } else {
+                            log.info("Published confirm event: userId={} eventId={} seatId={} orderId={}",
+                                    userId, eventId, seatId, orderId);
+                        }
+                    });
+        } catch (Exception e) {
+            log.error("Error serializing confirm event", e);
+        }
     }
 
     private static HttpStatus mapErrorToStatus(String error) {
