@@ -51,4 +51,30 @@ public class HoldController {
                 "reply", String.valueOf(res.rawReply())
         ));
     }
+
+    // GET /check -> check seat state
+    @GetMapping("/check")
+    public ResponseEntity<?> checkSeat(@RequestParam(defaultValue = "E1") String eventId,
+                                       @RequestParam(defaultValue = "A1") String seatId) throws Exception {
+        var res = client.checkSeat(eventId, seatId);
+        
+        if (res.ok()) {
+            return ResponseEntity.ok(Map.of(
+                    "status", "OK",
+                    "seatStatus", res.status(),
+                    "eventId", res.eventId() != null ? res.eventId() : "",
+                    "seatId", res.seatId() != null ? res.seatId() : "",
+                    "userId", res.userId() != null ? res.userId() : "",
+                    "holdId", res.holdId() != null ? res.holdId() : "",
+                    "expiresAtMillis", res.expiresAt() != null ? res.expiresAt() : 0,
+                    "orderId", res.orderId() != null ? res.orderId() : "",
+                    "correlationId", res.correlationId()
+            ));
+        }
+        return ResponseEntity.status(502).body(Map.of(
+                "status", "FAILED",
+                "error", res.error(),
+                "correlationId", res.correlationId()
+        ));
+    }
 }

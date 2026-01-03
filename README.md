@@ -39,7 +39,7 @@ The fat jar lands in `java/demo/target/demo-0.0.1-SNAPSHOT.jar`.
 ## Test the API
 With the stack running (gateway on `localhost:8080`), issue a hold request:
 ```bash
-curl -X POST "http://localhost:8080/hold?eventId=E1&seatId=A1&userId=user1"
+curl -X POST "http://localhost:8080/hold?eventId=E1&seatId=A1&userId=user1&holdSeconds=5"
 ```
 Expected JSON on success (HTTP 200):
 ```json
@@ -48,11 +48,19 @@ Expected JSON on success (HTTP 200):
   "eventId": "E1",
   "seatId": "A1",
   "userId": "user1",
+  "holdId": "uuid-generated-hold-id",
+  "expiresAtMillis": 1234567890123,
   "correlationId": "...",
-  "reply": "{write_seat_reply,{\"E1\",\"A1\"},ok}"
+  "reply": "{hold_seat_reply,{\"E1\",\"A1\"},{ok,\"hold-uuid\",1234567890123}}"
 }
 ```
-If the Erlang side rejects the write, the gateway returns HTTP 502 with an `error` field (e.g., `already_held` or `timeout_waiting_reply`).
+If the Erlang side rejects the write, the gateway returns HTTP 502 with an `error` field (e.g., `seat_already_held`, `user_already_holding_seat`, or `timeout_waiting_reply`).
+
+Check seat status:
+```bash
+curl "http://localhost:8080/check?eventId=E1&seatId=A1"
+```
+Response shows current state: `free`, `held`, `expired`, or `sold`.
 
 Confirm a hold (purchase) with a JSON body:
 ```bash
@@ -66,6 +74,16 @@ Error Responses:
 - 409 Conflict: Hold has already expired or seat is already sold.
 - 403 Forbidden: User ID does not match the original holder.
 - 404 Not Found: Hold ID is invalid.
+
+## Hold Expiration Flow
+1. When a hold is created, the seat is marked with `held` status and an expiration timestamp
+2. Every 5 seconds, each Erlang node runs a cleanup task that:
+   - Scans for seats with `held` status where `expires_at <= now()`
+   - Changes their status to `free`
+   - Removes the hold from the user's active holds list
+   - Sends a `hold_expired` notification to all registered gateways with metadata (eventId, seatId, userId, holdId)
+3. The Java gateway receives these notifications on a persistent mailbox and logs them (ready for Kafka publishing)
+4. Users can verify expiration by calling GET /check to see if a seat's status changed from `held` to `free`
 
 ## Erlang Core (mnesia + seat server)
 - Nodes: three Erlang nodes `res1@res1`, `res2@res2`, `res3@res3` (hostnames come from Docker Compose). They all share the same cookie `ticketcookie`.

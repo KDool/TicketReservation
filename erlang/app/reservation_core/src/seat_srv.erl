@@ -15,7 +15,9 @@ start_link() ->
 init(State) ->
     _ = application:start(mnesia),
     io:format("seat_srv started on ~p~n", [node()]),
-    {ok, State}.
+    %% Start periodic cleanup of expired holds
+    erlang:send_after(5000, self(), cleanup_expired_holds),
+    {ok, State#{gateway_pids => []}}.
 
 %% (Optional) keep calls for later
 handle_call(_Req, _From, State) ->
@@ -65,6 +67,24 @@ handle_info({confirm_hold, FromPid, UserId, HoldId}, State) ->
               [HoldId, UserId, FromPid]),
     {ReplyKey, Res} = confirm_tx(UserId, HoldId),
     FromPid ! {confirm_hold_reply, ReplyKey, Res},
+    {noreply, State};
+
+handle_info({check_seat, FromPid, EventId, SeatId}, State) ->
+    io:format("seat_srv got check_seat ~p ~p from ~p~n", [EventId, SeatId, FromPid]),
+    Res = check_seat_tx(EventId, SeatId),
+    FromPid ! {check_seat_reply, {EventId, SeatId}, Res},
+    {noreply, State};
+
+handle_info({register_gateway, GatewayPid}, State) ->
+    io:format("seat_srv registering gateway pid ~p~n", [GatewayPid]),
+    Pids = maps:get(gateway_pids, State, []),
+    {noreply, State#{gateway_pids => [GatewayPid | Pids]}};
+
+handle_info(cleanup_expired_holds, State) ->
+    GatewayPids = maps:get(gateway_pids, State, []),
+    cleanup_expired_holds_tx(GatewayPids),
+    %% Schedule next cleanup in 5 seconds
+    erlang:send_after(5000, self(), cleanup_expired_holds),
     {noreply, State};
 
 handle_info(Other, State) ->
@@ -164,6 +184,75 @@ find_seat_by_hold_id(HoldId) ->
     end.
 
 remove_user_hold(UserId, EventId, SeatId) ->
+
+cleanup_expired_holds_tx(GatewayPids) ->
+    Now = erlang:system_time(millisecond),
+    Fun = fun() ->
+        %% Find all held seats that have expired
+        AllSeats = mnesia:match_object({seat, '_', held, '_', '_', '_', '_'}),
+        ExpiredSeats = [S || {seat, _, held, _, _, ExpiresAt, _} = S <- AllSeats, ExpiresAt =< Now],
+        
+        %% Free each expired seat and notify gateways
+        lists:foreach(fun({seat, Key = {EventId, SeatId}, held, UserId, HoldId, ExpiresAt, OrderId}) ->
+            io:format("seat_srv freeing expired hold: ~p ~p holdId=~p~n", [EventId, SeatId, HoldId]),
+            mnesia:write({seat, Key, free, UserId, HoldId, ExpiresAt, OrderId}),
+            remove_user_hold(UserId, EventId, SeatId),
+            
+            %% Notify all registered gateways
+            Metadata = #{
+                event_id => EventId,
+                seat_id => SeatId,
+                user_id => UserId,
+                hold_id => HoldId,
+                expired_at => ExpiresAt
+            },
+            lists:foreach(fun(GwPid) ->
+                GwPid ! {hold_expired, Metadata}
+            end, GatewayPids)
+        end, ExpiredSeats),
+        
+        length(ExpiredSeats)
+    end,
+    case mnesia:transaction(Fun) of
+        {atomic, Count} when Count > 0 ->
+            io:format("seat_srv cleaned up ~p expired holds~n", [Count]),
+            ok;
+        {atomic, 0} ->
+            ok;
+        {aborted, Reason} ->
+            io:format("seat_srv cleanup failed: ~p~n", [Reason]),
+            error
+    end.
+
+check_seat_tx(EventId, SeatId) ->
+    Key = {EventId, SeatId},
+    Now = erlang:system_time(millisecond),
+    Fun = fun() ->
+        case mnesia:read(seat, Key) of
+            [] ->
+                {ok, #{status => free, event_id => EventId, seat_id => SeatId}};
+            [{seat, Key, Status, UserId, HoldId, ExpiresAt, OrderId}] ->
+                State = case Status of
+                    free -> free;
+                    held when ExpiresAt =< Now -> expired;
+                    held -> held;
+                    sold -> sold
+                end,
+                {ok, #{
+                    status => State,
+                    event_id => EventId,
+                    seat_id => SeatId,
+                    user_id => UserId,
+                    hold_id => HoldId,
+                    expires_at => ExpiresAt,
+                    order_id => OrderId
+                }}
+        end
+    end,
+    case mnesia:transaction(Fun) of
+        {atomic, R} -> R;
+        {aborted, Reason} -> {error, {tx_aborted, Reason}}
+    end.
     UserKey = {user_holds, UserId},
     case mnesia:read(user_holds, UserKey) of
         [] -> ok;
