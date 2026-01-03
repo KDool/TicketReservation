@@ -184,6 +184,18 @@ find_seat_by_hold_id(HoldId) ->
     end.
 
 remove_user_hold(UserId, EventId, SeatId) ->
+    UserKey = {user_holds, UserId},
+    case mnesia:read(user_holds, UserKey) of
+        [] -> ok;
+        [{user_holds, UserKey, Holds}] ->
+            Filtered = [H || H = {E, S, _Exp} <- Holds, not (E =:= EventId andalso S =:= SeatId)],
+            mnesia:write({user_holds, UserKey, Filtered}),
+            ok
+    end.
+
+make_order_id() ->
+    OrderNum = erlang:unique_integer([monotonic, positive]),
+    lists:concat(["order_", integer_to_list(OrderNum)]).
 
 cleanup_expired_holds_tx(GatewayPids) ->
     Now = erlang:system_time(millisecond),
@@ -253,15 +265,3 @@ check_seat_tx(EventId, SeatId) ->
         {atomic, R} -> R;
         {aborted, Reason} -> {error, {tx_aborted, Reason}}
     end.
-    UserKey = {user_holds, UserId},
-    case mnesia:read(user_holds, UserKey) of
-        [] -> ok;
-        [{user_holds, UserKey, Holds}] ->
-            Filtered = [H || H = {E, S, _Exp} <- Holds, not (E =:= EventId andalso S =:= SeatId)],
-            mnesia:write({user_holds, UserKey, Filtered}),
-            ok
-    end.
-
-make_order_id() ->
-    OrderNum = erlang:unique_integer([monotonic, positive]),
-    lists:concat(["order_", integer_to_list(OrderNum)]).
