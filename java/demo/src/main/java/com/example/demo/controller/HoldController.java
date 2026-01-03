@@ -18,12 +18,12 @@ public class HoldController {
 
     // POST /hold -> writes seat as held
     @PostMapping("/hold")
-    public ResponseEntity<?> hold(@RequestBody Map<String, Object> request,
-                                  @RequestParam(defaultValue = "5") long holdSeconds) throws Exception {
+    public ResponseEntity<?> hold(@RequestBody Map<String, Object> request) throws Exception {
 
         String eventId = (String) request.getOrDefault("eventId", "E1");
         String seatId = (String) request.getOrDefault("seatId", "A1");
         String userId = (String) request.getOrDefault("userId", "user1");
+        long holdSeconds = getLongFromRequest(request, "holdSeconds", 5);
         
         if (holdSeconds <= 0) {
             return ResponseEntity.badRequest().body(Map.of(
@@ -52,6 +52,14 @@ public class HoldController {
                 "correlationId", res.correlationId(),
                 "reply", String.valueOf(res.rawReply())
         ));
+    }
+
+    private long getLongFromRequest(Map<String, Object> request, String key, long defaultValue) {
+        Object val = request.get(key);
+        if (val instanceof Number) {
+            return ((Number) val).longValue();
+        }
+        return defaultValue;
     }
 
     // GET /check -> check seat state

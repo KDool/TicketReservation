@@ -36,44 +36,46 @@ mvn clean package -DskipTests
 ```
 The fat jar lands in `java/demo/target/demo-0.0.1-SNAPSHOT.jar`.
 
-## Test the API
-With the stack running (gateway on `localhost:8080`), issue a hold request:
-```bash
-curl -X POST "http://localhost:8080/hold?eventId=E1&seatId=A1&userId=user1&holdSeconds=5"
-```
-Expected JSON on success (HTTP 200):
-```json
-{
-  "status": "OK",
-  "eventId": "E1",
-  "seatId": "A1",
-  "userId": "user1",
-  "holdId": "uuid-generated-hold-id",
-  "expiresAtMillis": 1234567890123,
-  "correlationId": "...",
-  "reply": "{hold_seat_reply,{\"E1\",\"A1\"},{ok,\"hold-uuid\",1234567890123}}"
-}
-```
-If the Erlang side rejects the write, the gateway returns HTTP 502 with an `error` field (e.g., `seat_already_held`, `user_already_holding_seat`, or `timeout_waiting_reply`).
+## Quick Commands (Copy & Paste)
 
-Check seat status:
+### 1. Create a Hold
 ```bash
-curl "http://localhost:8080/check?eventId=E1&seatId=A1"
+curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"E1","seatId":"A1","userId":"user1","holdSeconds":600}' | jq '.'
+```
+
+### 2. Check Seat Status
+```bash
+curl -s "http://localhost:8080/check?eventId=E1&seatId=A1" | jq '.'
+```
+
+### 3. Confirm a Hold (Purchase)
+```bash
+curl -s -X POST "http://localhost:8080/reservations/confirm" -H "Content-Type: application/json" -d '{"userId":"user1","holdId":"HOLD_ID_HERE"}' | jq '.'
+```
+
+## Test the API (Detailed)
+With the stack running (gateway on `localhost:8080`), you can:
+
+**Create a hold:**
+```bash
+curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"E1","seatId":"A1","userId":"user1","holdSeconds":600}' | jq '.'
+```
+
+**Check seat status:**
+```bash
+curl -s "http://localhost:8080/check?eventId=E1&seatId=A1" | jq '.'
 ```
 Response shows current state: `free`, `held`, `expired`, or `sold`.
 
-Confirm a hold (purchase) with a JSON body:
+**Confirm a hold (purchase):**
 ```bash
-curl -X POST "http://localhost:8080/reservations/confirm" \
-  -H "Content-Type: application/json" \
-  -d '{"userId":"user1","holdId":"uuid-from-hold-response"}'
+curl -s -X POST "http://localhost:8080/reservations/confirm" -H "Content-Type: application/json" -d '{"userId":"user1","holdId":"uuid-from-hold-response"}' | jq '.'
 ```
-Success Response:
-- Code: 200 OK
-Error Responses:
-- 409 Conflict: Hold has already expired or seat is already sold.
-- 403 Forbidden: User ID does not match the original holder.
-- 404 Not Found: Hold ID is invalid.
+
+Success: HTTP 200 OK
+- Error 409: Hold expired or seat already sold
+- Error 403: User ID mismatch
+- Error 404: Hold ID not found
 
 ## Hold Expiration Flow
 1. When a hold is created, the seat is marked with `held` status and an expiration timestamp
@@ -120,6 +122,32 @@ curl "http://localhost:8080/check?eventId=TIMEOUT-TEST&seatId=E4"
 Expected response: `{"seatStatus":"free"}`
 
 This confirms the cleanup task successfully detected the expired hold and freed the seat. Valid seat prefixes are `A`–`F` (distributed across the three Erlang nodes as shown in the Seat Routing section).
+
+## Full Flow Test: HOLD → CONFIRM → SOLD (Copy this command)
+
+```bash
+HOLD=$(curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"FLOW-TEST","seatId":"A7","userId":"flow-user","holdSeconds":600}') && HOLD_ID=$(echo "$HOLD" | jq -r '.holdId') && echo "✓ Hold created: $HOLD_ID" && CONFIRM=$(curl -s -X POST "http://localhost:8080/reservations/confirm" -H "Content-Type: application/json" -d "{\"userId\":\"flow-user\",\"holdId\":\"$HOLD_ID\"}") && echo "✓ Confirmed: $(echo "$CONFIRM" | jq -r '.status')" && echo "✓ Final status: $(curl -s "http://localhost:8080/check?eventId=FLOW-TEST&seatId=A7" | jq -r '.seatStatus')"
+```
+
+Expected output:
+```
+✓ Hold created: <uuid>
+✓ Confirmed: success
+✓ Final status: sold
+```
+
+## Hold Expiration Test: HOLD → NO CONFIRM → EXPIRED (Copy this command)
+
+```bash
+HOLD=$(curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"NO-CONFIRM","seatId":"B5","userId":"no-confirm-user","holdSeconds":8}') && HOLD_ID=$(echo "$HOLD" | jq -r '.holdId') && echo "✓ Hold created: $HOLD_ID" && echo "  Waiting 9 seconds for expiration..." && sleep 9 && STATUS=$(curl -s "http://localhost:8080/check?eventId=NO-CONFIRM&seatId=B5") && echo "✓ After expiration - status: $(echo "$STATUS" | jq -r '.seatStatus')"
+```
+
+Expected output:
+```
+✓ Hold created: <uuid>
+  Waiting 9 seconds for expiration...
+✓ After expiration - status: expired
+```
 
 ## Erlang Core (mnesia + seat server)
 - Nodes: three Erlang nodes `res1@res1`, `res2@res2`, `res3@res3` (hostnames come from Docker Compose). They all share the same cookie `ticketcookie`.
