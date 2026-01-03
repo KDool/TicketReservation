@@ -85,6 +85,42 @@ Error Responses:
 3. The Java gateway receives these notifications on a persistent mailbox and logs them (ready for Kafka publishing)
 4. Users can verify expiration by calling GET /check to see if a seat's status changed from `held` to `free`
 
+## Testing the Timeout Workflow
+To verify the automatic hold expiration mechanism works end-to-end:
+
+**Step 1: Create a hold with 5-second expiration**
+```bash
+curl -X POST "http://localhost:8080/hold" \
+  -H "Content-Type: application/json" \
+  -d '{"eventId":"TIMEOUT-TEST","seatId":"E4","userId":"timeout-tester","holdSeconds":5}'
+```
+Expected response (HTTP 200):
+```json
+{
+  "status": "OK",
+  "eventId": "TIMEOUT-TEST",
+  "seatId": "E4",
+  "userId": "timeout-tester",
+  "holdId": "...",
+  "expiresAtMillis": 1767458746207,
+  "reply": "..."
+}
+```
+Note the `expiresAtMillis` value—the hold will expire 5 seconds after creation.
+
+**Step 2: Wait 6 seconds (slightly longer than the 5-second expiration)**
+```bash
+sleep 6
+```
+
+**Step 3: Check the seat status**
+```bash
+curl "http://localhost:8080/check?eventId=TIMEOUT-TEST&seatId=E4"
+```
+Expected response: `{"seatStatus":"free"}`
+
+This confirms the cleanup task successfully detected the expired hold and freed the seat. Valid seat prefixes are `A`–`F` (distributed across the three Erlang nodes as shown in the Seat Routing section).
+
 ## Erlang Core (mnesia + seat server)
 - Nodes: three Erlang nodes `res1@res1`, `res2@res2`, `res3@res3` (hostnames come from Docker Compose). They all share the same cookie `ticketcookie`.
 - Mnesia bootstrap: only `res1` runs `init_mnesia:bootstrap/3` once to create the schema/table and writes a marker file in its mnesia volume. Followers wait for the marker, then start mnesia and join the cluster.
