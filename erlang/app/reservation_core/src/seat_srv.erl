@@ -56,9 +56,12 @@ handle_info({write_seat, FromPid, EventId, SeatId}, State) ->
     {noreply, State};
 
 handle_info({hold_seat, FromPid, EventId, SeatId, UserId, HoldId, ExpiresAtMs}, State) ->
-    io:format("seat_srv got hold_seat ~p ~p for user ~p exp=~p from ~p~n",
-              [EventId, SeatId, UserId, ExpiresAtMs, FromPid]),
+    Now = erlang:system_time(millisecond),
+    io:format("[CONCURRENCY] seat_srv got hold_seat ~p ~p for user ~p (holdId=~p) at ~p from ~p~n",
+              [EventId, SeatId, UserId, HoldId, Now, FromPid]),
     Res = hold_tx(EventId, SeatId, UserId, HoldId, ExpiresAtMs),
+    io:format("[CONCURRENCY] seat_srv hold_seat result for ~p ~p user=~p: ~p~n",
+              [EventId, SeatId, UserId, Res]),
     FromPid ! {hold_seat_reply, {EventId, SeatId}, Res},
     {noreply, State};
 
@@ -96,9 +99,12 @@ code_change(_, State, _) -> {ok, State}.
 
 %% free/expired -> held (create if missing)
 %% Also enforces: user can hold only one seat at a time
+%% Transaction ensures serialization for concurrent requests
 hold_tx(EventId, SeatId, UserId, HoldId, ExpiresAtMs) ->
     Key = {EventId, SeatId},
     Now = erlang:system_time(millisecond),
+    io:format("[CONCURRENCY] Starting hold_tx for ~p ~p user=~p at ~p~n", 
+              [EventId, SeatId, UserId, Now]),
     Fun = fun() ->
         %% Step 1: Check if user already has an active hold
         UserHoldsKey = {user_holds, UserId},
@@ -113,36 +119,51 @@ hold_tx(EventId, SeatId, UserId, HoldId, ExpiresAtMs) ->
         case ActiveHolds of
             [] ->
                 %% No active hold for this user, proceed with seat hold
-                case mnesia:read(seat, Key) of
+                SeatRecord = mnesia:read(seat, Key),
+                io:format("[CONCURRENCY] Read seat ~p state: ~p~n", [Key, SeatRecord]),
+                case SeatRecord of
                     [] ->
                         %% New seat
+                        io:format("[CONCURRENCY] Creating new seat ~p for user ~p~n", [Key, UserId]),
                         mnesia:write({seat, Key, held, UserId, HoldId, ExpiresAtMs, undefined}),
                         mnesia:write({user_holds, UserHoldsKey, [{EventId, SeatId, ExpiresAtMs} | UserHoldsList]}),
                         {ok, HoldId, ExpiresAtMs};
                     [{seat, Key, free, _, _, _, OrderId}] ->
+                        io:format("[CONCURRENCY] Claiming free seat ~p for user ~p~n", [Key, UserId]),
                         mnesia:write({seat, Key, held, UserId, HoldId, ExpiresAtMs, OrderId}),
                         mnesia:write({user_holds, UserHoldsKey, [{EventId, SeatId, ExpiresAtMs} | UserHoldsList]}),
                         {ok, HoldId, ExpiresAtMs};
-                    [{seat, Key, held, _, _, CurExp, OrderId}] when CurExp =< Now ->
+                    [{seat, Key, held, HeldUserId, _, CurExp, OrderId}] when CurExp =< Now ->
                         %% Seat hold expired, reclaim it
+                        io:format("[CONCURRENCY] Reclaiming expired seat ~p (was held by ~p) for user ~p~n", 
+                                  [Key, HeldUserId, UserId]),
                         mnesia:write({seat, Key, held, UserId, HoldId, ExpiresAtMs, OrderId}),
                         mnesia:write({user_holds, UserHoldsKey, [{EventId, SeatId, ExpiresAtMs} | UserHoldsList]}),
                         {ok, HoldId, ExpiresAtMs};
-                    [{seat, Key, held, _, CurHoldId, CurExp, _}] ->
+                    [{seat, Key, held, HeldUserId, CurHoldId, CurExp, _}] ->
+                        io:format("[CONCURRENCY] CONFLICT: Seat ~p already held by ~p (holdId=~p, exp=~p), rejecting user ~p~n",
+                                  [Key, HeldUserId, CurHoldId, CurExp, UserId]),
                         {error, {seat_already_held, CurHoldId, CurExp}};
-                    [{seat, Key, sold, _, _, _, _}] ->
+                    [{seat, Key, sold, SoldUserId, _, _, _}] ->
+                        io:format("[CONCURRENCY] CONFLICT: Seat ~p already sold to ~p, rejecting user ~p~n",
+                                  [Key, SoldUserId, UserId]),
                         {error, seat_already_sold}
                 end;
             [ActiveHold | _] ->
                 %% User already has an active hold
                 {ExpEventId, ExpSeatId, ExpExp} = ActiveHold,
+                io:format("[CONCURRENCY] User ~p already holding seat ~p:~p (exp=~p), rejecting new hold ~p:~p~n",
+                          [UserId, ExpEventId, ExpSeatId, ExpExp, EventId, SeatId]),
                 {error, {user_already_holding_seat, ExpEventId, ExpSeatId, ExpExp}}
         end
     end,
-    case mnesia:transaction(Fun) of
+    Result = case mnesia:transaction(Fun) of
         {atomic, R} -> R;
         {aborted, Reason} -> {error, {tx_aborted, Reason}}
-    end.
+    end,
+    io:format("[CONCURRENCY] Completed hold_tx for ~p ~p user=~p result=~p~n",
+              [EventId, SeatId, UserId, Result]),
+    Result.
 
 confirm_tx(UserId, HoldId) ->
     Now = erlang:system_time(millisecond),
