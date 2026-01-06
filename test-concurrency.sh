@@ -9,9 +9,11 @@ echo "Concurrent Seat Hold Test"
 echo "========================================="
 echo ""
 
-# Define test parameters
+# Define test parameters - use timestamp to ensure unique seat ID
+TIMESTAMP=$(date +%s)
+SEAT_NUM=$((TIMESTAMP % 100))
 EVENT_ID="E1"
-SEAT_ID="A10"
+SEAT_ID="A${SEAT_NUM}"
 HOLD_SECONDS=600
 
 echo "Test Scenario: Two users trying to hold the same seat simultaneously"
