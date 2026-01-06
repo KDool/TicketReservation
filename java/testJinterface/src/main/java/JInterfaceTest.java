@@ -14,18 +14,22 @@ public class JInterfaceTest {
 
         System.out.println("Java node up: " + node.node());
 
-        // Message:
-        // {write_seat, FromPid, <<"E1">>, <<"A1">>, <<"user1">>}
+        String holdId = "hold-" + System.currentTimeMillis();
+        long expiresAt = System.currentTimeMillis() + 5000;
+
+        // Message: {hold_seat, FromPid, <<"E1">>, <<"A1">>, <<"user1">>, <<"hold-x">>, 1700...}
         OtpErlangTuple msg = new OtpErlangTuple(new OtpErlangObject[]{
-                new OtpErlangAtom("write_seat"),
+                new OtpErlangAtom("hold_seat"),
                 mbox.self(),
                 new OtpErlangString("E1"),
                 new OtpErlangString("A1"),
-                new OtpErlangString("user1")
+                new OtpErlangString("user1"),
+                new OtpErlangString(holdId),
+                new OtpErlangLong(expiresAt)
         });
 
         mbox.send(remoteProcess, remoteNode, msg);
-        System.out.println("Sent write_seat");
+        System.out.println("Sent hold_seat id=" + holdId + " exp=" + expiresAt);
 
         OtpErlangObject reply = mbox.receive(3000);
         System.out.println("Reply = " + reply);

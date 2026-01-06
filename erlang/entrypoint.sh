@@ -41,19 +41,34 @@ exec erl -noshell -noinput \
             io:format(\"[BOOTSTRAP] result=~p~n\", [Res])
         end;
       \"false\" ->
-        io:format(\"[FOLLOWER] waiting for marker ~s~n\", [Marker]),
-        WaitFun = fun F() ->
-          case filelib:is_file(Marker) of
-            true -> ok;
-            false -> timer:sleep(1000), F()
+        Seed = res1@res1,
+        io:format(\"[FOLLOWER] waiting for seed ~p~n\", [Seed]),
+        WaitSeed = fun F() ->
+          case net_adm:ping(Seed) of
+            pong -> ok;
+            pang -> timer:sleep(1000), F()
           end
         end,
-        WaitFun(),
-        io:format(\"[FOLLOWER] marker found~n\", [])
+        WaitSeed(),
+        ok = application:set_env(mnesia, extra_db_nodes, [Seed])
     end,
 
     %% Start mnesia locally (after bootstrap or after marker)
-    application:start(mnesia),
+    StartMnesia = fun F() ->
+      case application:start(mnesia) of
+        ok -> ok;
+        {error, {already_started, mnesia}} -> ok;
+        _ -> timer:sleep(1000), F()
+      end
+    end,
+    StartMnesia(),
+    WaitTable = fun F() ->
+      case mnesia:wait_for_tables([seat], 30000) of
+        ok -> ok;
+        _ -> timer:sleep(1000), F()
+      end
+    end,
+    WaitTable(),
 
     %% Start OTP core (no rpc/start_link across temporary node!)
     code:add_patha(\"/app\"),

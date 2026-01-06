@@ -13,4 +13,14 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 
+    <dependencies>
+       <dependency>
+           <groupId>local</groupId>
+           <artifactId>otp-erlang</artifactId>
+           <version>1.14</version>
+           <scope>system</scope>
+           <systemPath>${project.basedir}/OtpErlang-otp26-java21-1.14.jar</systemPath>
+       </dependency>
+    </dependencies>
+
 </project>

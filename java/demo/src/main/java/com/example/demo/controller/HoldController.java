@@ -16,13 +16,23 @@ public class HoldController {
         this.client = client;
     }
 
-    // POST /hold -> writes seat "E1","A1" as held
+    // POST /hold -> writes seat as held
     @PostMapping("/hold")
-    public ResponseEntity<?> hold(@RequestParam(defaultValue = "E1") String eventId,
-                                  @RequestParam(defaultValue = "A1") String seatId,
-                                  @RequestParam(defaultValue = "user1") String userId) throws Exception {
+    public ResponseEntity<?> hold(@RequestBody Map<String, Object> request) throws Exception {
 
-        var res = client.writeHold(eventId, seatId, userId, Duration.ofSeconds(3));
+        String eventId = (String) request.getOrDefault("eventId", "E1");
+        String seatId = (String) request.getOrDefault("seatId", "A1");
+        String userId = (String) request.getOrDefault("userId", "user1");
+        long holdSeconds = getLongFromRequest(request, "holdSeconds", 5);
+        
+        if (holdSeconds <= 0) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "status", "FAILED",
+                    "error", "holdSeconds must be > 0"
+            ));
+        }
+
+        var res = client.writeHold(eventId, seatId, userId, Duration.ofSeconds(holdSeconds));
 
         if (res.ok()) {
             return ResponseEntity.ok(Map.of(
@@ -30,6 +40,8 @@ public class HoldController {
                     "eventId", eventId,
                     "seatId", seatId,
                     "userId", userId,
+                    "holdId", res.holdId(),
+                    "expiresAtMillis", res.expiresAtMillis(),
                     "correlationId", res.correlationId(),
                     "reply", res.rawReply()
             ));
@@ -39,6 +51,40 @@ public class HoldController {
                 "error", res.error(),
                 "correlationId", res.correlationId(),
                 "reply", String.valueOf(res.rawReply())
+        ));
+    }
+
+    private long getLongFromRequest(Map<String, Object> request, String key, long defaultValue) {
+        Object val = request.get(key);
+        if (val instanceof Number) {
+            return ((Number) val).longValue();
+        }
+        return defaultValue;
+    }
+
+    // GET /check -> check seat state
+    @GetMapping("/check")
+    public ResponseEntity<?> checkSeat(@RequestParam(defaultValue = "E1") String eventId,
+                                       @RequestParam(defaultValue = "A1") String seatId) throws Exception {
+        var res = client.checkSeat(eventId, seatId);
+        
+        if (res.ok()) {
+            return ResponseEntity.ok(Map.of(
+                    "status", "OK",
+                    "seatStatus", res.status(),
+                    "eventId", res.eventId() != null ? res.eventId() : "",
+                    "seatId", res.seatId() != null ? res.seatId() : "",
+                    "userId", res.userId() != null ? res.userId() : "",
+                    "holdId", res.holdId() != null ? res.holdId() : "",
+                    "expiresAtMillis", res.expiresAt() != null ? res.expiresAt() : 0,
+                    "orderId", res.orderId() != null ? res.orderId() : "",
+                    "correlationId", res.correlationId()
+            ));
+        }
+        return ResponseEntity.status(502).body(Map.of(
+                "status", "FAILED",
+                "error", res.error(),
+                "correlationId", res.correlationId()
         ));
     }
 }
