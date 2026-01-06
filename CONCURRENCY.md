@@ -130,7 +130,7 @@ Verification:
 Use the provided test script:
 
 ```bash
-cd /Users/mohammed_abdalhady/Desktop/Home/Projects/TicketReservation
+# From the project root directory
 ./test-concurrency.sh
 ```
 
