@@ -143,35 +143,6 @@ services:
       KAFKA_EXPIRED_TOPIC: hold.expired
       GOOGLE_CHAT_WEBHOOK_URL: https://chat.googleapis.com/v1/spaces/AAQAj1AwqAo/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=zezIgKfIu5wz1Ww5rEQdzFc2tRskQPylucG5dy3jNI8
 
-  kafka:
-    image: confluentinc/cp-kafka:7.5.0
-    container_name: kafka
-    hostname: kafka
-    networks:
-      - erlangnet
-    ports:
-      - "9092:9092"
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-    depends_on:
-      - zookeeper
-
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.5.0
-    container_name: zookeeper
-    hostname: zookeeper
-    networks:
-      - erlangnet
-    ports:
-      - "2181:2181"
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_SYNC_LIMIT: 2
-      ZOOKEEPER_INIT_LIMIT: 5
-
   worker:
     build: ../java/worker
     container_name: worker
