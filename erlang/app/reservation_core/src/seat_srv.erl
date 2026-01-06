@@ -10,14 +10,14 @@
          handle_info/2, terminate/2, code_change/3]).
 
 start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, #{gateway_pid => undefined}, []).
+    gen_server:start_link({local, ?MODULE}, ?MODULE, #{}, []).
 
 init(State) ->
     _ = application:start(mnesia),
     io:format("seat_srv started on ~p~n", [node()]),
-    %% Start periodic cleanup of expired holds (every 5 seconds)
+    %% Start periodic cleanup of expired holds
     erlang:send_after(5000, self(), cleanup_expired_holds),
-    {ok, State}.
+    {ok, State#{gateway_pids => []}}.
 
 %% (Optional) keep calls for later
 handle_call(_Req, _From, State) ->
@@ -31,10 +31,13 @@ handle_cast(_Msg, State) ->
 %%
 %% Expected message (gateway):
 %%   {hold_seat, FromPid, EventId, SeatId, UserId, HoldId, ExpiresAtMs}
+%%   {confirm_hold, FromPid, UserId, HoldId}
 %%
 %% Reply:
 %%   {hold_seat_reply, {EventId, SeatId},
 %%     {ok, HoldId, ExpiresAtMs} | {error, Reason}}
+%%   {confirm_hold_reply, {EventId, SeatId},
+%%     {ok, OrderId} | {error, Reason}}
 %%
 %% Legacy support (tests / old clients):
 %%   {write_seat, FromPid, EventId, SeatId}
@@ -59,22 +62,29 @@ handle_info({hold_seat, FromPid, EventId, SeatId, UserId, HoldId, ExpiresAtMs}, 
     FromPid ! {hold_seat_reply, {EventId, SeatId}, Res},
     {noreply, State};
 
-handle_info({register_gateway, GatewayPid}, State) ->
-    io:format("seat_srv: gateway registered ~p on node ~p~n", [GatewayPid, node()]),
-    {noreply, State#{gateway_pid => GatewayPid}};
-
-handle_info(cleanup_expired_holds, State) ->
-    %% Periodic cleanup: transition expired holds back to free
-    GatewayPid = maps:get(gateway_pid, State, undefined),
-    cleanup_expired_holds_tx(GatewayPid),
-    %% Reschedule for 5 seconds later
-    erlang:send_after(5000, self(), cleanup_expired_holds),
+handle_info({confirm_hold, FromPid, UserId, HoldId}, State) ->
+    io:format("seat_srv got confirm_hold holdId=~p user=~p from ~p~n",
+              [HoldId, UserId, FromPid]),
+    {ReplyKey, Res} = confirm_tx(UserId, HoldId),
+    FromPid ! {confirm_hold_reply, ReplyKey, Res},
     {noreply, State};
 
 handle_info({check_seat, FromPid, EventId, SeatId}, State) ->
     io:format("seat_srv got check_seat ~p ~p from ~p~n", [EventId, SeatId, FromPid]),
     Res = check_seat_tx(EventId, SeatId),
     FromPid ! {check_seat_reply, {EventId, SeatId}, Res},
+    {noreply, State};
+
+handle_info({register_gateway, GatewayPid}, State) ->
+    io:format("seat_srv registering gateway pid ~p~n", [GatewayPid]),
+    Pids = maps:get(gateway_pids, State, []),
+    {noreply, State#{gateway_pids => [GatewayPid | Pids]}};
+
+handle_info(cleanup_expired_holds, State) ->
+    GatewayPids = maps:get(gateway_pids, State, []),
+    cleanup_expired_holds_tx(GatewayPids),
+    %% Schedule next cleanup in 5 seconds
+    erlang:send_after(5000, self(), cleanup_expired_holds),
     {noreply, State};
 
 handle_info(Other, State) ->
@@ -134,66 +144,121 @@ hold_tx(EventId, SeatId, UserId, HoldId, ExpiresAtMs) ->
         {aborted, Reason} -> {error, {tx_aborted, Reason}}
     end.
 
-%% ========================================================
-%% Periodic cleanup: expire held seats if their time has passed
-cleanup_expired_holds_tx(GatewayPid) ->
+confirm_tx(UserId, HoldId) ->
     Now = erlang:system_time(millisecond),
     Fun = fun() ->
-        %% Scan all seats and find expired holds
-        AllSeats = mnesia:match_object(seat, {seat, {'_', '_'}, held, '_', '_', '_', '_'}, read),
-        ExpiredSeats = lists:filter(fun({seat, _, held, _, _, ExpTime, _}) -> ExpTime =< Now end, AllSeats),
-        
-        %% Collect expired hold info and clean up
-        lists:foldl(fun({seat, Key, held, UserId, HoldId, ExpTime, OrderId}, AccHolds) ->
-            {EventId, SeatId} = Key,
-            
-            mnesia:write({seat, Key, free, <<"">>, <<"">>, 0, OrderId}),
-            
-            %% Remove from user_holds
-            UserHoldsKey = {user_holds, UserId},
-            case mnesia:read(user_holds, UserHoldsKey) of
-                [] -> ok;
-                [{user_holds, _, Holds}] ->
-                    NewHolds = lists:filter(fun({E, S, _}) -> {E, S} =/= Key end, Holds),
-                    case NewHolds of
-                        [] -> mnesia:delete(user_holds, UserHoldsKey, write);
-                        _ -> mnesia:write({user_holds, UserHoldsKey, NewHolds})
-                    end
-            end,
-            
-            io:format("cleanup: expired hold released ~p~n", [Key]),
-            [{EventId, SeatId, UserId, HoldId, ExpTime} | AccHolds]
-        end, [], ExpiredSeats)
+        case find_seat_by_hold_id(HoldId) of
+            not_found ->
+                {{undefined, undefined}, {error, hold_not_found}};
+            {seat, Key = {EventId, SeatId}, State, SeatUserId, HoldId, ExpiresAt, _OrderId} ->
+                case State of
+                    sold ->
+                        {{EventId, SeatId}, {error, seat_already_sold}};
+                    held ->
+                        case SeatUserId =:= UserId of
+                            false ->
+                                {{EventId, SeatId}, {error, user_mismatch}};
+                            true when ExpiresAt =< Now ->
+                                {{EventId, SeatId}, {error, hold_expired}};
+                            true ->
+                                OrderId = make_order_id(),
+                                mnesia:write({seat, Key, sold, UserId, HoldId, ExpiresAt, OrderId}),
+                                remove_user_hold(UserId, EventId, SeatId),
+                                {{EventId, SeatId}, {ok, OrderId}}
+                        end;
+                    free ->
+                        {{EventId, SeatId}, {error, hold_expired}}
+                end
+        end
     end,
     case mnesia:transaction(Fun) of
-        {atomic, ExpiredHolds} ->
-            io:format("cleanup: found ~p expired holds, gateway_pid=~p~n", [length(ExpiredHolds), GatewayPid]),
-            %% Notify gateway about each expired hold
-            lists:foreach(fun({EventId, SeatId, UserId, HoldId, ExpTime}) ->
-                case GatewayPid of
-                    undefined -> 
-                        io:format("cleanup: skipping notify - no gateway registered~n", []);
-                    _ ->
-                        io:format("cleanup: sending hold_expired to gateway ~p~n", [GatewayPid]),
-                        GatewayPid ! {hold_expired, EventId, SeatId, UserId, HoldId, ExpTime}
-                end
-            end, ExpiredHolds),
-            ok;
-        {aborted, Reason} ->
-            io:format("cleanup_expired_holds_tx failed: ~p~n", [Reason]),
+        {atomic, R} -> R;
+        {aborted, Reason} -> {{undefined, undefined}, {error, {tx_aborted, Reason}}}
+    end.
+
+find_seat_by_hold_id(HoldId) ->
+    Match = [{{seat, '$1', '$2', '$3', HoldId, '$5', '$6'}, [], ['$_']}],
+    case mnesia:select(seat, Match) of
+        [] -> not_found;
+        [Seat | _] -> Seat
+    end.
+
+remove_user_hold(UserId, EventId, SeatId) ->
+    UserKey = {user_holds, UserId},
+    case mnesia:read(user_holds, UserKey) of
+        [] -> ok;
+        [{user_holds, UserKey, Holds}] ->
+            Filtered = [H || H = {E, S, _Exp} <- Holds, not (E =:= EventId andalso S =:= SeatId)],
+            mnesia:write({user_holds, UserKey, Filtered}),
             ok
     end.
 
-%% ========================================================
-%% Query seat state
+make_order_id() ->
+    OrderNum = erlang:unique_integer([monotonic, positive]),
+    lists:concat(["order_", integer_to_list(OrderNum)]).
+
+cleanup_expired_holds_tx(GatewayPids) ->
+    Now = erlang:system_time(millisecond),
+    Fun = fun() ->
+        %% Find all held seats that have expired
+        AllSeats = mnesia:match_object({seat, '_', held, '_', '_', '_', '_'}),
+        ExpiredSeats = [S || {seat, _, held, _, _, ExpiresAt, _} = S <- AllSeats, ExpiresAt =< Now],
+        
+        %% Free each expired seat and notify gateways
+        lists:foreach(fun({seat, Key = {EventId, SeatId}, held, UserId, HoldId, ExpiresAt, OrderId}) ->
+            io:format("seat_srv freeing expired hold: ~p ~p holdId=~p~n", [EventId, SeatId, HoldId]),
+            mnesia:write({seat, Key, free, UserId, HoldId, ExpiresAt, OrderId}),
+            remove_user_hold(UserId, EventId, SeatId),
+            
+            %% Notify all registered gateways
+            Metadata = #{
+                event_id => EventId,
+                seat_id => SeatId,
+                user_id => UserId,
+                hold_id => HoldId,
+                expired_at => ExpiresAt
+            },
+            lists:foreach(fun(GwPid) ->
+                GwPid ! {hold_expired, Metadata}
+            end, GatewayPids)
+        end, ExpiredSeats),
+        
+        length(ExpiredSeats)
+    end,
+    case mnesia:transaction(Fun) of
+        {atomic, Count} when Count > 0 ->
+            io:format("seat_srv cleaned up ~p expired holds~n", [Count]),
+            ok;
+        {atomic, 0} ->
+            ok;
+        {aborted, Reason} ->
+            io:format("seat_srv cleanup failed: ~p~n", [Reason]),
+            error
+    end.
+
 check_seat_tx(EventId, SeatId) ->
     Key = {EventId, SeatId},
+    Now = erlang:system_time(millisecond),
     Fun = fun() ->
         case mnesia:read(seat, Key) of
             [] ->
-                {ok, free, <<"">>, <<"">>, 0};
-            [{seat, _, State, UserId, HoldId, ExpTime, _}] ->
-                {ok, State, UserId, HoldId, ExpTime}
+                {ok, #{status => free, event_id => EventId, seat_id => SeatId}};
+            [{seat, Key, Status, UserId, HoldId, ExpiresAt, OrderId}] ->
+                State = case Status of
+                    free -> free;
+                    held when ExpiresAt =< Now -> expired;
+                    held -> held;
+                    sold -> sold
+                end,
+                {ok, #{
+                    status => State,
+                    event_id => EventId,
+                    seat_id => SeatId,
+                    user_id => UserId,
+                    hold_id => HoldId,
+                    expires_at => ExpiresAt,
+                    order_id => OrderId
+                }}
         end
     end,
     case mnesia:transaction(Fun) of

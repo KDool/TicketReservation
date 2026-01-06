@@ -36,23 +36,170 @@ mvn clean package -DskipTests
 ```
 The fat jar lands in `java/demo/target/demo-0.0.1-SNAPSHOT.jar`.
 
-## Test the API
-With the stack running (gateway on `localhost:8080`), issue a hold request:
+## Quick Commands (Copy & Paste)
+
+### 1. Create a Hold (A/B seats → res1)
 ```bash
-curl -X POST "http://localhost:8080/hold?eventId=E1&seatId=A1&userId=user1"
+curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"E1","seatId":"A1","userId":"user1","holdSeconds":600}' | jq '.'
 ```
-Expected JSON on success (HTTP 200):
+
+### 2. Create a Hold (C/D seats → res2)
+```bash
+curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"E2","seatId":"C5","userId":"user2","holdSeconds":600}' | jq '.'
+```
+
+### 3. Create a Hold (E/F seats → res3)
+```bash
+curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"E3","seatId":"E9","userId":"user3","holdSeconds":600}' | jq '.'
+```
+
+### 4. Check Seat Status
+```bash
+curl -s "http://localhost:8080/check?eventId=E1&seatId=A1" | jq '.'
+```
+
+### 5. Confirm a Hold (Purchase)
+```bash
+curl -s -X POST "http://localhost:8080/reservations/confirm" -H "Content-Type: application/json" -d '{"userId":"user1","holdId":"HOLD_ID_HERE"}' | jq '.'
+```
+
+**Note:** SeatId prefix determines routing:
+- `A/B` → Erlang node `res1@res1`
+- `C/D` → Erlang node `res2@res2`
+- `E/F` → Erlang node `res3@res3`
+
+## Test the API (Detailed)
+With the stack running (gateway on `localhost:8080`), you can:
+
+**Create a hold:**
+```bash
+curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"E1","seatId":"A1","userId":"user1","holdSeconds":600}' | jq '.'
+```
+
+**Check seat status:**
+```bash
+curl -s "http://localhost:8080/check?eventId=E1&seatId=A1" | jq '.'
+```
+Response shows current state: `free`, `held`, `expired`, or `sold`.
+
+**Confirm a hold (purchase):**
+```bash
+curl -s -X POST "http://localhost:8080/reservations/confirm" -H "Content-Type: application/json" -d '{"userId":"user1","holdId":"uuid-from-hold-response"}' | jq '.'
+```
+
+Success: HTTP 200 OK
+- Error 409: Hold expired or seat already sold
+- Error 403: User ID mismatch
+- Error 404: Hold ID not found
+
+## Hold Expiration Flow
+1. When a hold is created, the seat is marked with `held` status and an expiration timestamp
+2. Every 5 seconds, each Erlang node runs a cleanup task that:
+   - Scans for seats with `held` status where `expires_at <= now()`
+   - Changes their status to `free`
+   - Removes the hold from the user's active holds list
+   - Sends a `hold_expired` notification to all registered gateways with metadata (eventId, seatId, userId, holdId)
+3. The Java gateway receives these notifications on a persistent mailbox and logs them (ready for Kafka publishing)
+4. Users can verify expiration by calling GET /check to see if a seat's status changed from `held` to `free`
+
+## Testing the Timeout Workflow
+To verify the automatic hold expiration mechanism works end-to-end:
+
+**Step 1: Create a hold with 5-second expiration**
+```bash
+curl -X POST "http://localhost:8080/hold" \
+  -H "Content-Type: application/json" \
+  -d '{"eventId":"TIMEOUT-TEST","seatId":"E4","userId":"timeout-tester","holdSeconds":5}'
+```
+Expected response (HTTP 200):
 ```json
 {
   "status": "OK",
-  "eventId": "E1",
-  "seatId": "A1",
-  "userId": "user1",
-  "correlationId": "...",
-  "reply": "{write_seat_reply,{\"E1\",\"A1\"},ok}"
+  "eventId": "TIMEOUT-TEST",
+  "seatId": "E4",
+  "userId": "timeout-tester",
+  "holdId": "...",
+  "expiresAtMillis": 1767458746207,
+  "reply": "..."
 }
 ```
-If the Erlang side rejects the write, the gateway returns HTTP 502 with an `error` field (e.g., `already_held` or `timeout_waiting_reply`).
+Note the `expiresAtMillis` value—the hold will expire 5 seconds after creation.
+
+**Step 2: Wait 6 seconds (slightly longer than the 5-second expiration)**
+```bash
+sleep 6
+```
+
+**Step 3: Check the seat status**
+```bash
+curl "http://localhost:8080/check?eventId=TIMEOUT-TEST&seatId=E4"
+```
+Expected response: `{"seatStatus":"free"}`
+
+This confirms the cleanup task successfully detected the expired hold and freed the seat. Valid seat prefixes are `A`–`F` (distributed across the three Erlang nodes as shown in the Seat Routing section).
+
+## Full Flow Test: HOLD → CONFIRM → SOLD (Copy this command)
+
+```bash
+HOLD=$(curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"FLOW-TEST","seatId":"A7","userId":"flow-user","holdSeconds":600}') && HOLD_ID=$(echo "$HOLD" | jq -r '.holdId') && echo "✓ Hold created: $HOLD_ID" && CONFIRM=$(curl -s -X POST "http://localhost:8080/reservations/confirm" -H "Content-Type: application/json" -d "{\"userId\":\"flow-user\",\"holdId\":\"$HOLD_ID\"}") && echo "✓ Confirmed: $(echo "$CONFIRM" | jq -r '.status')" && echo "✓ Final status: $(curl -s "http://localhost:8080/check?eventId=FLOW-TEST&seatId=A7" | jq -r '.seatStatus')"
+```
+
+Expected output:
+```
+✓ Hold created: <uuid>
+✓ Confirmed: success
+✓ Final status: sold
+```
+
+## Hold Expiration Test: HOLD → NO CONFIRM → EXPIRED (Copy this command)
+
+```bash
+HOLD=$(curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"NO-CONFIRM","seatId":"B5","userId":"no-confirm-user","holdSeconds":8}') && HOLD_ID=$(echo "$HOLD" | jq -r '.holdId') && echo "✓ Hold created: $HOLD_ID" && echo "  Waiting 9 seconds for expiration..." && sleep 9 && STATUS=$(curl -s "http://localhost:8080/check?eventId=NO-CONFIRM&seatId=B5") && echo "✓ After expiration - status: $(echo "$STATUS" | jq -r '.seatStatus')"
+```
+
+Expected output:
+```
+✓ Hold created: <uuid>
+  Waiting 9 seconds for expiration...
+✓ After expiration - status: expired
+```
+
+## Seat Routing Test: Verify Distribution Across Nodes (Copy this command)
+
+The gateway routes requests based on **seatId prefix** to distribute load across 3 Erlang nodes:
+- **A/B** → `res1@res1`
+- **C/D** → `res2@res2`  
+- **E/F** → `res3@res3`
+
+```bash
+echo "A/B → res1:" && curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"R1","seatId":"A10","userId":"r-a10","holdSeconds":60}' | jq '.seatId, .status' && curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"R2","seatId":"B11","userId":"r-b11","holdSeconds":60}' | jq '.seatId, .status' && echo "" && echo "C/D → res2:" && curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"R3","seatId":"C12","userId":"r-c12","holdSeconds":60}' | jq '.seatId, .status' && curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"R4","seatId":"D13","userId":"r-d13","holdSeconds":60}' | jq '.seatId, .status' && echo "" && echo "E/F → res3:" && curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"R5","seatId":"E14","userId":"r-e14","holdSeconds":60}' | jq '.seatId, .status' && curl -s -X POST "http://localhost:8080/hold" -H "Content-Type: application/json" -d '{"eventId":"R6","seatId":"F15","userId":"r-f15","holdSeconds":60}' | jq '.seatId, .status'
+```
+
+Expected output:
+```
+A/B → res1:
+"A10"
+"OK"
+"B11"
+"OK"
+
+C/D → res2:
+"C12"
+"OK"
+"D13"
+"OK"
+
+E/F → res3:
+"E14"
+"OK"
+"F15"
+"OK"
+```
+
+Verify routing in gateway logs:
+```bash
+docker logs gateway 2>&1 | grep "route seatId" | tail -6
+```
 
 ## Test Seat Hold Timeout Workflow
 

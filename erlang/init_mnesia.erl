@@ -35,17 +35,16 @@ bootstrap(Nodes, MarkerPath, _SeatTable) ->
 
     %% 4) Tell other nodes to join via extra_db_nodes=[res1@res1], then start mnesia
     [Seed | _] = Nodes,
-    lists:foreach(fun(N) ->
-        case N =:= Seed of
+    lists:foreach(fun(Node) ->
+        case Node =:= Seed of
             true -> ok;
             false ->
-                _ = rpc:call(N, application, set_env, [mnesia, extra_db_nodes, [Seed]]),
-                R = rpc:call(N, application, start, [mnesia]),
-                io:format("start mnesia on ~p => ~p~n", [N, R]),
+                _ = rpc:call(Node, application, set_env, [mnesia, extra_db_nodes, [Seed]]),
+                R = rpc:call(Node, application, start, [mnesia]),
                 case R of
                     ok -> ok;
                     {error, {already_started, mnesia}} -> ok;
-                    Other2 -> throw({mnesia_start_failed, N, Other2})
+                    Other2 -> throw({mnesia_start_failed, Node, Other2})
                 end
         end
     end, Nodes),

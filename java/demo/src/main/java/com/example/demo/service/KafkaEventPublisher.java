@@ -1,42 +1,52 @@
 package com.example.demo.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.stereotype.Component;
+import org.springframework.stereotype.Service;
 
-import tools.jackson.databind.ObjectMapper;
-
-import java.util.HashMap;
-import java.util.Map;
-
-@Component
+@Service
 public class KafkaEventPublisher {
 
-    private static final String HOLD_EXPIRED_TOPIC = "seat-hold-expired";
+    private static final Logger log = LoggerFactory.getLogger(KafkaEventPublisher.class);
+
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
+    private final String holdExpiredTopic;
 
-    public KafkaEventPublisher(KafkaTemplate<String, String> kafkaTemplate, ObjectMapper objectMapper) {
+    public KafkaEventPublisher(KafkaTemplate<String, String> kafkaTemplate,
+                               ObjectMapper objectMapper,
+                               @Value("${app.kafka.hold-expired-topic:hold.expired}") String holdExpiredTopic) {
         this.kafkaTemplate = kafkaTemplate;
         this.objectMapper = objectMapper;
+        this.holdExpiredTopic = holdExpiredTopic;
     }
 
-    public void publishHoldExpired(String eventId, String seatId, String userId, String holdId, long expiresAtMs) {
+    public void publishHoldExpired(String eventId, String seatId, String userId, String holdId, Long expiredAt) {
         try {
-            Map<String, Object> event = new HashMap<>();
-            event.put("eventType", "HoldExpired");
-            event.put("eventId", eventId);
-            event.put("seatId", seatId);
-            event.put("userId", userId);
-            event.put("holdId", holdId);
-            event.put("expiresAtMs", expiresAtMs);
-            event.put("timestamp", System.currentTimeMillis());
-
-            String payload = objectMapper.writeValueAsString(event);
-            kafkaTemplate.send(HOLD_EXPIRED_TOPIC, holdId, payload);
-            System.out.println("[Kafka] Published HoldExpired: " + payload);
+            HoldExpiredEvent event = new HoldExpiredEvent(eventId, seatId, userId, holdId, expiredAt);
+            String eventJson = objectMapper.writeValueAsString(event);
+            
+            kafkaTemplate.send(holdExpiredTopic, userId, eventJson)
+                    .whenComplete((result, ex) -> {
+                        if (ex != null) {
+                            log.error("Failed to publish hold_expired event for userId={} holdId={}", 
+                                    userId, holdId, ex);
+                        } else {
+                            log.info("Published hold_expired event: userId={} eventId={} seatId={} holdId={}", 
+                                    userId, eventId, seatId, holdId);
+                        }
+                    });
         } catch (Exception e) {
-            System.err.println("[Kafka] Failed to publish HoldExpired: " + e.getMessage());
-            e.printStackTrace();
+            log.error("Error serializing hold_expired event", e);
         }
     }
+
+    public record HoldExpiredEvent(String eventId, 
+                                   String seatId, 
+                                   String userId, 
+                                   String holdId, 
+                                   Long expiredAt) {}
 }

@@ -16,13 +16,15 @@ public class HoldController {
         this.client = client;
     }
 
-    // POST /hold -> writes seat "E1","A1" as held
+    // POST /hold -> writes seat as held
     @PostMapping("/hold")
-    public ResponseEntity<?> hold(@RequestParam(defaultValue = "E1") String eventId,
-                                  @RequestParam(defaultValue = "A1") String seatId,
-                                  @RequestParam(defaultValue = "user1") String userId,
-                                  @RequestParam(defaultValue = "30") long holdSeconds) throws Exception {
+    public ResponseEntity<?> hold(@RequestBody Map<String, Object> request) throws Exception {
 
+        String eventId = (String) request.getOrDefault("eventId", "E1");
+        String seatId = (String) request.getOrDefault("seatId", "A1");
+        String userId = (String) request.getOrDefault("userId", "user1");
+        long holdSeconds = getLongFromRequest(request, "holdSeconds", 5);
+        
         if (holdSeconds <= 0) {
             return ResponseEntity.badRequest().body(Map.of(
                     "status", "FAILED",
@@ -49,25 +51,33 @@ public class HoldController {
                 "error", res.error(),
                 "correlationId", res.correlationId(),
                 "reply", String.valueOf(res.rawReply())
-        ));    }
+        ));
+    }
 
-    // GET /hold/check -> check if a hold is still active
-    @GetMapping("/hold/check")
-    public ResponseEntity<?> checkHold(@RequestParam String eventId,
-                                       @RequestParam String seatId) throws Exception {
-        long now = System.currentTimeMillis();
+    private long getLongFromRequest(Map<String, Object> request, String key, long defaultValue) {
+        Object val = request.get(key);
+        if (val instanceof Number) {
+            return ((Number) val).longValue();
+        }
+        return defaultValue;
+    }
+
+    // GET /check -> check seat state
+    @GetMapping("/check")
+    public ResponseEntity<?> checkSeat(@RequestParam(defaultValue = "E1") String eventId,
+                                       @RequestParam(defaultValue = "A1") String seatId) throws Exception {
         var res = client.checkSeat(eventId, seatId);
-
+        
         if (res.ok()) {
             return ResponseEntity.ok(Map.of(
                     "status", "OK",
-                    "eventId", eventId,
-                    "seatId", seatId,
-                    "seatState", res.seatState(),
-                    "userId", res.userId(),
-                    "holdId", res.holdId(),
-                    "expiresAtMillis", res.expiresAtMillis(),
-                    "isExpired", res.expiresAtMillis() != null && res.expiresAtMillis() <= now,
+                    "seatStatus", res.status(),
+                    "eventId", res.eventId() != null ? res.eventId() : "",
+                    "seatId", res.seatId() != null ? res.seatId() : "",
+                    "userId", res.userId() != null ? res.userId() : "",
+                    "holdId", res.holdId() != null ? res.holdId() : "",
+                    "expiresAtMillis", res.expiresAt() != null ? res.expiresAt() : 0,
+                    "orderId", res.orderId() != null ? res.orderId() : "",
                     "correlationId", res.correlationId()
             ));
         }
@@ -76,5 +86,5 @@ public class HoldController {
                 "error", res.error(),
                 "correlationId", res.correlationId()
         ));
-    }    }
-    
+    }
+}
