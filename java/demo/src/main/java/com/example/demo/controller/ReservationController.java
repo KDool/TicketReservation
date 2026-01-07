@@ -55,7 +55,8 @@ public class ReservationController {
             return ResponseEntity.ok(Map.of(
                     "status", "success",
                     "code", HttpStatus.OK.value(),
-                    "data", Map.of("orderId", res.orderId())
+                    "data", Map.of("orderId", res.orderId()),
+                    "correlationId", res.correlationId()
             ));
         }
 
@@ -64,7 +65,8 @@ public class ReservationController {
         return ResponseEntity.status(status).body(Map.of(
                 "status", "error",
                 "code", status.value(),
-                "error", res.error()
+                "error", res.error(),
+                "correlationId", res.correlationId()
         ));
     }
 
