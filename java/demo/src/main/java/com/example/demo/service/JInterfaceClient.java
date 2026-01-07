@@ -7,6 +7,7 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -19,6 +20,7 @@ public class JInterfaceClient {
     private static final String REMOTE_REG_NAME = "seat_srv";
     private static final int PING_TIMEOUT_MS = 2000;
     private static final int CONFIRM_TIMEOUT_MS = 3000;
+    private static final int LIST_SEATS_TIMEOUT_MS = 3000;
     private static final long DOWN_COOLDOWN_MS = 10_000L;
 
     private OtpNode node;
@@ -243,6 +245,61 @@ public class JInterfaceClient {
             lastError = "no_candidate_nodes";
         }
         return new CheckSeatResult(false, corr, null, lastError, null, null, null, null, null, null, null);
+    }
+
+    public EventSeatsResult listEventSeats(String eventId) throws Exception {
+        String corr = UUID.randomUUID().toString();
+        String lastError = null;
+        List<String> nodes = List.of(
+                routingProps.getNodeRes1(),
+                routingProps.getNodeRes2(),
+                routingProps.getNodeRes3()
+        );
+
+        for (String remoteNode : nodes) {
+            if (!shouldTryNode(remoteNode)) {
+                continue;
+            }
+
+            boolean reachable = node.ping(remoteNode, PING_TIMEOUT_MS);
+            if (!reachable) {
+                markDown(remoteNode);
+                lastError = "node_unreachable:" + remoteNode;
+                continue;
+            }
+
+            OtpMbox mbox = node.createMbox();
+            OtpErlangTuple msg = new OtpErlangTuple(new OtpErlangObject[]{
+                    new OtpErlangAtom("list_event_seats"),
+                    mbox.self(),
+                    new OtpErlangString(eventId)
+            });
+
+            System.out.println("[JIF] list_event_seats eventId=" + eventId + " -> " + remoteNode);
+
+            try {
+                mbox.send(REMOTE_REG_NAME, remoteNode, msg);
+                OtpErlangObject reply = mbox.receive(LIST_SEATS_TIMEOUT_MS);
+                System.out.println("[JIF] list_event_seats rawReply=" + reply);
+
+                if (reply == null) {
+                    markDown(remoteNode);
+                    lastError = "timeout_waiting_reply:" + remoteNode;
+                    continue;
+                }
+
+                markUp(remoteNode);
+                return EventSeatsResult.fromErlang(corr, reply);
+            } catch (Exception e) {
+                markDown(remoteNode);
+                lastError = "send_failed:" + remoteNode + ":" + e.getClass().getSimpleName();
+            }
+        }
+
+        if (lastError == null) {
+            lastError = "no_candidate_nodes";
+        }
+        return new EventSeatsResult(false, corr, null, lastError, List.of());
     }
 
     public ConfirmResult confirmHold(String userId, String holdId) throws Exception {
@@ -494,6 +551,86 @@ public class JInterfaceClient {
                 }
             }
             return new CheckSeatResult(false, corr, raw, "unexpected_reply_format", null, null, null, null, null, null, null);
+        }
+
+        private static String extractMapString(OtpErlangMap map, String key) {
+            try {
+                OtpErlangObject value = map.get(new OtpErlangAtom(key));
+                return normalizeUndefined(asString(value));
+            } catch (Exception e) {
+                return null;
+            }
+        }
+
+        private static Long extractMapLong(OtpErlangMap map, String key) {
+            try {
+                OtpErlangObject value = map.get(new OtpErlangAtom(key));
+                return asLong(value);
+            } catch (Exception e) {
+                return null;
+            }
+        }
+    }
+
+    public record EventSeat(String seatId,
+                            String status,
+                            String userId,
+                            String holdId,
+                            Long expiresAt,
+                            String orderId) {}
+
+    public record EventSeatsResult(boolean ok,
+                                   String correlationId,
+                                   String rawReply,
+                                   String error,
+                                   List<EventSeat> seats) {
+        static EventSeatsResult fromErlang(String corr, OtpErlangObject obj) {
+            String raw = obj == null ? null : obj.toString();
+            if (obj instanceof OtpErlangTuple tup && tup.arity() >= 3) {
+                OtpErlangObject payload = tup.elementAt(2);
+                if (payload instanceof OtpErlangTuple pt && pt.arity() >= 1) {
+                    OtpErlangObject statusAtom = pt.elementAt(0);
+                    if (statusAtom instanceof OtpErlangAtom a && "ok".equals(a.atomValue())) {
+                        List<EventSeat> seats = new ArrayList<>();
+                        if (pt.arity() > 1 && pt.elementAt(1) instanceof OtpErlangList list) {
+                            for (OtpErlangObject seatObj : list.elements()) {
+                                if (seatObj instanceof OtpErlangMap map) {
+                                    String status = extractMapString(map, "status");
+                                    String seatId = extractMapString(map, "seat_id");
+                                    String userId = extractMapString(map, "user_id");
+                                    String holdId = extractMapString(map, "hold_id");
+                                    Long expiresAt = extractMapLong(map, "expires_at");
+                                    String orderId = extractMapString(map, "order_id");
+                                    seats.add(new EventSeat(
+                                            seatId,
+                                            mapSeatStatus(status),
+                                            userId,
+                                            holdId,
+                                            expiresAt,
+                                            orderId
+                                    ));
+                                }
+                            }
+                        }
+                        return new EventSeatsResult(true, corr, raw, null, seats);
+                    }
+                    if (statusAtom instanceof OtpErlangAtom a && "error".equals(a.atomValue())) {
+                        String reason = pt.arity() > 1 ? asString(pt.elementAt(1)) : "unknown_error";
+                        return new EventSeatsResult(false, corr, raw, reason, List.of());
+                    }
+                }
+            }
+            return new EventSeatsResult(false, corr, raw, "unexpected_reply_format", List.of());
+        }
+
+        private static String mapSeatStatus(String status) {
+            if (status == null) return null;
+            return switch (status) {
+                case "held" -> "HOLD";
+                case "sold" -> "CONFIRMED";
+                case "free", "expired" -> "FREE";
+                default -> status.toUpperCase();
+            };
         }
 
         private static String extractMapString(OtpErlangMap map, String key) {

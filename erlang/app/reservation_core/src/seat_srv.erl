@@ -32,12 +32,15 @@ handle_cast(_Msg, State) ->
 %% Expected message (gateway):
 %%   {hold_seat, FromPid, EventId, SeatId, UserId, HoldId, ExpiresAtMs}
 %%   {confirm_hold, FromPid, UserId, HoldId}
+%%   {list_event_seats, FromPid, EventId}
 %%
 %% Reply:
 %%   {hold_seat_reply, {EventId, SeatId},
 %%     {ok, HoldId, ExpiresAtMs} | {error, Reason}}
 %%   {confirm_hold_reply, {EventId, SeatId},
 %%     {ok, OrderId} | {error, Reason}}
+%%   {list_event_seats_reply, EventId,
+%%     {ok, [Map]} | {error, Reason}}
 %%
 %% Legacy support (tests / old clients):
 %%   {write_seat, FromPid, EventId, SeatId}
@@ -73,6 +76,12 @@ handle_info({check_seat, FromPid, EventId, SeatId}, State) ->
     io:format("seat_srv got check_seat ~p ~p from ~p~n", [EventId, SeatId, FromPid]),
     Res = check_seat_tx(EventId, SeatId),
     FromPid ! {check_seat_reply, {EventId, SeatId}, Res},
+    {noreply, State};
+
+handle_info({list_event_seats, FromPid, EventId}, State) ->
+    io:format("seat_srv got list_event_seats ~p from ~p~n", [EventId, FromPid]),
+    Res = list_event_seats_tx(EventId),
+    FromPid ! {list_event_seats_reply, EventId, Res},
     {noreply, State};
 
 handle_info({register_gateway, GatewayPid}, State) ->
@@ -263,5 +272,32 @@ check_seat_tx(EventId, SeatId) ->
     end,
     case mnesia:transaction(Fun) of
         {atomic, R} -> R;
+        {aborted, Reason} -> {error, {tx_aborted, Reason}}
+    end.
+
+list_event_seats_tx(EventId) ->
+    Now = erlang:system_time(millisecond),
+    Fun = fun() ->
+        Seats = mnesia:match_object({seat, {EventId, '_'}, '_', '_', '_', '_', '_'}),
+        lists:map(fun({seat, {EvId, SeatId}, Status, UserId, HoldId, ExpiresAt, OrderId}) ->
+            State = case Status of
+                free -> free;
+                held when ExpiresAt =< Now -> expired;
+                held -> held;
+                sold -> sold
+            end,
+            #{
+                status => State,
+                event_id => EvId,
+                seat_id => SeatId,
+                user_id => UserId,
+                hold_id => HoldId,
+                expires_at => ExpiresAt,
+                order_id => OrderId
+            }
+        end, Seats)
+    end,
+    case mnesia:transaction(Fun) of
+        {atomic, R} -> {ok, R};
         {aborted, Reason} -> {error, {tx_aborted, Reason}}
     end.
