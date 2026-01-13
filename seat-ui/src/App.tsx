@@ -8,6 +8,8 @@ type Seat = {
   col: number;
   status: SeatStatus;
   holdId?: string;
+  userId?: string;
+  expiresAt?: number;
 };
 
 type SnapshotSeat = {
@@ -73,12 +75,32 @@ export default function App() {
   const [seats, setSeats] = useState<Seat[]>(createInitialSeats);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [userId, setUserId] = useState<string>(() => {
+    const stored = localStorage.getItem('userId');
+    if (stored) return stored;
+    const newId = `user${Math.floor(Math.random() * 10000)}`;
+    localStorage.setItem('userId', newId);
+    return newId;
+  });
+  const [currentTime, setCurrentTime] = useState(Date.now());
+
+  // Update current time every second for countdown timers
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setCurrentTime(Date.now());
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   const seatById = useMemo(() => {
     const m = new Map<string, Seat>();
     seats.forEach(s => m.set(s.seatId, s));
     return m;
   }, [seats]);
+
+  const myHolds = useMemo(() => {
+    return seats.filter(s => s.status === "HOLD" && s.userId === userId);
+  }, [seats, userId]);
 
   function showToast(payload: {
     status?: string;
@@ -99,8 +121,6 @@ export default function App() {
   }
 
   async function confirmWithPrompt(seatId: string, holdId: string) {
-    const userId = prompt("userId") || "";
-    if (!userId) return;
     setBusy(true);
     try {
       const res = await apiConfirm({ userId, holdId });
@@ -126,8 +146,6 @@ export default function App() {
   }
 
   async function hold(seatId: string) {
-    const userId = prompt("userId") || "";
-    if (!userId) return;
     let holdRes: { holdId?: string; userId?: string } | null = null;
     setBusy(true);
     try {
@@ -135,8 +153,9 @@ export default function App() {
       const data = res.data || {};
       if (res.ok) {
         holdRes = data;
+        const expiresAt = Date.now() + HOLD_SECONDS * 1000;
         setSeats(prev =>
-          prev.map(s => s.seatId === seatId ? { ...s, status: "HOLD", holdId: data.holdId } : s)
+          prev.map(s => s.seatId === seatId ? { ...s, status: "HOLD", holdId: data.holdId, userId, expiresAt } : s)
         );
       }
       showToast({
@@ -180,7 +199,7 @@ export default function App() {
   }, []);
 
   return (
-    <div style={{ padding: 20 }}>
+    <div style={{ padding: 20, fontFamily: 'system-ui, -apple-system, sans-serif' }}>
       {toast && (
         <div
           style={{
@@ -199,8 +218,104 @@ export default function App() {
           {toast}
         </div>
       )}
-      <h2>Seat UI</h2>
-      <button onClick={refresh} disabled={busy}>Refresh</button>
+      
+      <div style={{ marginBottom: 24 }}>
+        <h2 style={{ margin: '0 0 8px 0' }}>Ticket Reservation System</h2>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
+          <div>
+            <strong>User ID:</strong> {userId}
+            <button 
+              onClick={() => {
+                const newId = prompt('Enter new user ID:', userId);
+                if (newId) {
+                  setUserId(newId);
+                  localStorage.setItem('userId', newId);
+                }
+              }}
+              style={{ marginLeft: 8, padding: '4px 8px', fontSize: '12px' }}
+            >
+              Change
+            </button>
+          </div>
+          <button 
+            onClick={refresh} 
+            disabled={busy}
+            style={{ 
+              padding: '8px 16px',
+              fontSize: '14px',
+              background: '#007bff',
+              color: 'white',
+              border: 'none',
+              borderRadius: 4,
+              cursor: busy ? 'not-allowed' : 'pointer',
+              opacity: busy ? 0.6 : 1
+            }}
+          >
+            {busy ? 'Loading...' : 'Refresh Seats'}
+          </button>
+        </div>
+
+        {/* Legend */}
+        <div style={{ display: 'flex', gap: 16, marginBottom: 16, fontSize: '14px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ width: 16, height: 16, background: '#fff', border: '1px solid #ccc' }}></div>
+            <span>Free</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ width: 16, height: 16, background: '#ffcc00' }}></div>
+            <span>On Hold</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ width: 16, height: 16, background: '#28a745' }}></div>
+            <span>Confirmed</span>
+          </div>
+        </div>
+
+        {/* My Holds Section */}
+        {myHolds.length > 0 && (
+          <div style={{ 
+            background: '#f8f9fa', 
+            padding: 12, 
+            borderRadius: 6, 
+            marginBottom: 16,
+            border: '1px solid #dee2e6'
+          }}>
+            <strong>My Holds ({myHolds.length}):</strong>
+            <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {myHolds.map(seat => {
+                const remaining = seat.expiresAt ? Math.max(0, Math.floor((seat.expiresAt - currentTime) / 1000)) : 0;
+                return (
+                  <div key={seat.seatId} style={{ 
+                    background: 'white', 
+                    padding: '6px 10px', 
+                    borderRadius: 4,
+                    fontSize: '13px',
+                    border: '1px solid #ccc'
+                  }}>
+                    <strong>{seat.seatId}</strong> - {remaining}s
+                    <button
+                      onClick={() => seat.holdId && confirmWithPrompt(seat.seatId, seat.holdId)}
+                      disabled={busy}
+                      style={{
+                        marginLeft: 8,
+                        padding: '2px 6px',
+                        fontSize: '11px',
+                        background: '#28a745',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: 3,
+                        cursor: busy ? 'not-allowed' : 'pointer'
+                      }}
+                    >
+                      Confirm
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
       <div
         style={{
           display: "grid",
@@ -235,30 +350,45 @@ export default function App() {
               {Array.from({ length: COLS }, (_, i) => i + 1).map(c => {
                 const id = `${zone}${pad2(c)}`;
                 const s = seatById.get(id)!;
-                const bg = s.status === "FREE" ? "#fff" : s.status === "HOLD" ? "#f00" : "#0f0";
+                const bg = s.status === "FREE" ? "#fff" : s.status === "HOLD" ? "#ffcc00" : "#28a745";
+                const isMyHold = s.status === "HOLD" && s.userId === userId;
+                const remaining = s.expiresAt ? Math.max(0, Math.floor((s.expiresAt - currentTime) / 1000)) : 0;
+                
                 return (
                   <button
                     key={id}
                     onClick={async () => {
                       if (s.status === "FREE") {
-                        const shouldHold = window.confirm("Seat is free. Hold it?");
+                        const shouldHold = window.confirm(`Hold seat ${id}?`);
                         if (shouldHold) await hold(id);
                         return;
                       }
-                      if (s.status === "HOLD" && s.holdId) {
-                        const shouldConfirm = window.confirm("Confirm reservation for this hold?");
+                      if (s.status === "HOLD" && s.holdId && isMyHold) {
+                        const shouldConfirm = window.confirm(`Confirm reservation for ${id}?`);
                         if (shouldConfirm) await confirmWithPrompt(id, s.holdId);
                       }
                     }}
                     style={{
                       background: bg,
-                      width: 36,
-                      height: 36,
-                      border: "1px solid #ccc",
+                      width: 40,
+                      height: 40,
+                      border: isMyHold ? '2px solid #007bff' : '1px solid #ccc',
                       borderRadius: 4,
+                      cursor: (s.status === "FREE" || isMyHold) ? "pointer" : "not-allowed",
+                      fontSize: 10,
+                      fontWeight: 500,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      padding: 2,
+                      color: s.status === "CONFIRMED" ? '#fff' : '#000'
                     }}
+                    disabled={busy || (s.status === "HOLD" && !isMyHold) || s.status === "CONFIRMED"}
+                    title={`${id} - ${s.status}${isMyHold ? ` (${remaining}s)` : ''}`}
                   >
-                    {c}
+                    <span>{c}</span>
+                    {isMyHold && remaining > 0 && <span style={{ fontSize: 8 }}>{remaining}s</span>}
                   </button>
                 );
               })}
