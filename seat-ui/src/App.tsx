@@ -23,7 +23,7 @@ const COLS = 50;
 const ENV = (import.meta as any).env || {};
 const EVENT_ID = ENV.VITE_EVENT_ID || "E1";
 const HOLD_SECONDS = Number.parseInt(ENV.VITE_HOLD_SECONDS || "30", 10);
-const API_BASE = ENV.VITE_API_BASE || "http://localhost:8080";
+const API_BASE = ENV.VITE_API_BASE || "http://10.2.1.4:8080";
 
 function pad2(n: number) {
   return String(n).padStart(2, "0");
