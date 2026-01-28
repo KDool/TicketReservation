@@ -201,6 +201,180 @@ Verify routing in gateway logs:
 docker logs gateway 2>&1 | grep "route seatId" | tail -6
 ```
 
+## Test Seat Hold Timeout Workflow
+
+The system implements a full event-driven hold expiration workflow with Kafka notifications:
+
+### Prerequisites
+Ensure the stack is running:
+```bash
+cd infra
+docker compose up -d
+sleep 15
+docker compose ps
+```
+
+You should see services running:
+- `res1`, `res2`, `res3` (Erlang nodes)
+- `gateway` (Spring Boot JInterface client)
+- `worker` (Kafka consumer for notifications)
+- `kafka`, `zookeeper` (event streaming)
+
+### Step 1: Create a hold with 5-second timeout
+```bash
+curl -X POST "http://localhost:8080/hold?eventId=E1&seatId=A1&userId=user1&holdSeconds=5"
+```
+
+Response (200 OK):
+```json
+{
+  "status": "OK",
+  "eventId": "E1",
+  "seatId": "A1",
+  "userId": "user1",
+  "holdId": "0ff81641-68b1-4af7-b20f-9cb9ca30ba19",
+  "expiresAtMillis": 1767447209799,
+  "correlationId": "b29c6836-c185-42c0-b8c5-36b00b069a45"
+}
+```
+
+### Step 2: Check hold is active (within 5 seconds)
+```bash
+curl "http://localhost:8080/hold/check?eventId=E1&seatId=A1"
+```
+
+Response (200 OK):
+```json
+{
+  "status": "OK",
+  "seatState": "held",
+  "userId": "user1",
+  "holdId": "0ff81641-68b1-4af7-b20f-9cb9ca30ba19",
+  "expiresAtMillis": 1767447209799,
+  "isExpired": false
+}
+```
+
+### Step 3: Wait for expiration
+```bash
+sleep 6
+```
+
+### Step 4: Verify hold has expired
+```bash
+curl "http://localhost:8080/hold/check?eventId=E1&seatId=A1"
+```
+
+Response (200 OK) - seat is now free:
+```json
+{
+  "status": "OK",
+  "seatState": "free",
+  "userId": "#Bin<0>",
+  "holdId": "#Bin<0>",
+  "isExpired": true,
+  "expiresAtMillis": 0
+}
+```
+
+### Step 5: Verify Kafka event was published and consumed by Worker
+```bash
+docker compose logs worker | grep -A 8 "EMAIL NOTIFICATION" | head -20
+```
+
+You should see output like:
+```
+worker  | [EMAIL NOTIFICATION]
+worker  | To: user1@example.com
+worker  | Subject: Your seat hold has expired
+worker  | Body:
+worker  |   Hold ID: 0ff81641-68b1-4af7-b20f-9cb9ca30ba19
+worker  |   Event: E1
+worker  |   Seat: A1
+worker  |   Expired at: 1767447209799
+worker  |   Action: Please reserve again if interested
+worker  | ============================================================
+```
+
+### Step 6: Verify user can hold the same seat after expiration
+```bash
+curl -X POST "http://localhost:8080/hold?eventId=E1&seatId=A1&userId=user2&holdSeconds=30"
+```
+
+Response (200 OK) - seat is now free and available for a new user.
+
+### Step 7: Test single-hold-per-user constraint (optional)
+Try to hold a different seat while user1 already has an active hold:
+```bash
+# Create hold for user1, seat A1 (5s)
+curl -X POST "http://localhost:8080/hold?eventId=E1&seatId=A1&userId=user1&holdSeconds=5"
+
+# Immediately try to hold another seat (should fail - user1 already has a hold)
+curl -X POST "http://localhost:8080/hold?eventId=E2&seatId=A2&userId=user1&holdSeconds=5"
+```
+
+The second request will fail because user1 can only hold one seat at a time.
+
+### Event-Driven Workflow Architecture
+
+The complete system implements automatic seat hold expiration with event notifications:
+
+```
+┌─────────────┐
+│   Client    │
+└──────┬──────┘
+       │ POST /hold
+       ▼
+┌──────────────────┐
+│  Spring Gateway  │─────────────┐
+│  (JInterface)    │             │
+└──────────────────┘             │
+       │                         │
+       │ RPC {hold_seat, ...}   │
+       ▼                         │
+┌──────────────────────────────┐ │
+│  Erlang Cluster (res1/2/3)  │ │
+│  Mnesia DB                   │ │
+│  - seat table (distributed)  │ │
+│  - user_holds table          │ │
+│                              │ │
+│  Cleanup Task (every 5s):    │ │
+│  - Scan expired holds        │ │
+│  - Transition to free state  │ │
+│  - Send hold_expired message │ │
+└──────────────────────────────┘ │
+       │                         │
+       │ {hold_expired, ...}     │
+       └────────────────────────┬┘
+                                │
+                                ▼
+                          ┌─────────────┐
+                          │   Kafka     │
+                          │ Topic:      │
+                          │ seat-hold   │
+                          │ -expired    │
+                          └─────────────┘
+                                │
+                                ▼
+                          ┌──────────────────┐
+                          │ Worker Service   │
+                          │ @KafkaListener   │
+                          │ Notification     │
+                          │ (email, SMS)     │
+                          └──────────────────┘
+```
+
+### Workflow Summary
+1. ✅ **Gateway** receives hold request with expiry duration (in seconds)
+2. ✅ **Erlang** stores hold in Mnesia with expiry timestamp, enforces single-hold-per-user constraint
+3. ✅ **Cleanup Task** runs every 5 seconds, detects expired holds
+4. ✅ **Seat State** automatically transitions from `held` → `free`
+5. ✅ **Hold Expired Event** sent via mailbox to Gateway
+6. ✅ **Kafka Event** published to `seat-hold-expired` topic with full notification payload
+7. ✅ **Worker Service** consumes Kafka event, processes notification (email simulation in logs)
+8. ✅ **User** can immediately reserve the same seat again
+9. ✅ **Constraint** enforced: user can only hold one seat at a time across the event
+
 ## Erlang Core (mnesia + seat server)
 - Nodes: three Erlang nodes `res1@res1`, `res2@res2`, `res3@res3` (hostnames come from Docker Compose). They all share the same cookie `ticketcookie`.
 - Mnesia bootstrap: only `res1` runs `init_mnesia:bootstrap/3` once to create the schema/table and writes a marker file in its mnesia volume. Followers wait for the marker, then start mnesia and join the cluster.

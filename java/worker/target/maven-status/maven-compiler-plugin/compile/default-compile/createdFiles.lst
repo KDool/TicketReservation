@@ -1,0 +1,3 @@
+com/example/worker/WorkerApplication.class
+com/example/worker/config/KafkaConfig.class
+com/example/worker/service/HoldExpiredEventConsumer.class

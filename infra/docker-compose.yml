@@ -79,6 +79,7 @@ services:
   #     - res1
   #     - res2
   #     - res3
+
   gateway:
     build: ../java/demo
     container_name: gateway
@@ -142,12 +143,23 @@ services:
       KAFKA_EXPIRED_TOPIC: hold.expired
       GOOGLE_CHAT_WEBHOOK_URL: https://chat.googleapis.com/v1/spaces/AAQAj1AwqAo/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=zezIgKfIu5wz1Ww5rEQdzFc2tRskQPylucG5dy3jNI8
 
-
-networks:
-  erlangnet:
-    driver: bridge
+  worker:
+    build: ../java/worker
+    container_name: worker
+    hostname: worker
+    depends_on:
+      - kafka
+    networks:
+      - erlangnet
+    environment:
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    restart: on-failure
 
 volumes:
   mnesia_res1:
   mnesia_res2:
   mnesia_res3:
+
+networks:
+  erlangnet:
+    driver: bridge
